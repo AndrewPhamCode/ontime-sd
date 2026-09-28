@@ -5,26 +5,7 @@ from __future__ import annotations
 import pytest
 
 from ontime_sd.config import TRIP_UPDATES, VEHICLE_POSITIONS, Settings
-
-
-def _settings(**overrides: object) -> Settings:
-    base: dict[str, object] = {
-        "database_url": "postgresql://u:p@localhost:5433/db",
-        "mts_api_key": "",
-        "mts_feed_base_url": "http://localhost:8081/api/api/gtfs_realtime",
-        "poll_interval_seconds": 30,
-        "prediction_change_threshold_seconds": 30,
-        "backoff_base_seconds": 1.0,
-        "backoff_max_seconds": 300.0,
-        "health_port": 8080,
-        "health_stale_after_seconds": 300,
-        "log_level": "INFO",
-        "mock_port": 8081,
-        "mock_vehicle_count": 40,
-        "mock_failure_rate": 0.0,
-    }
-    base.update(overrides)
-    return Settings(**base)  # type: ignore[arg-type]
+from tests.conftest import make_settings as _settings
 
 
 def test_missing_database_url_is_a_clear_error(clean_env: pytest.MonkeyPatch) -> None:
@@ -93,6 +74,9 @@ def test_unknown_feed_is_rejected() -> None:
         ({"backoff_base_seconds": 0}, "BACKOFF_BASE_SECONDS"),
         ({"backoff_base_seconds": 10.0, "backoff_max_seconds": 5.0}, "BACKOFF_MAX_SECONDS"),
         ({"mock_failure_rate": 1.5}, "MOCK_FAILURE_RATE"),
+        ({"mock_truncate_rate": -0.1}, "MOCK_TRUNCATE_RATE"),
+        ({"mock_feed_refresh_seconds": 0}, "MOCK_FEED_REFRESH_SECONDS"),
+        ({"mock_trip_update_style": "guessing"}, "MOCK_TRIP_UPDATE_STYLE"),
     ],
 )
 def test_invalid_settings_are_rejected_at_startup(overrides: dict[str, object], match: str) -> None:

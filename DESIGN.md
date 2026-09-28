@@ -531,3 +531,73 @@ joined to the collected data in SQL.
 **At scale.** This table grows at a fixed, predictable rate of about 5,800 rows
 per day, which is trivial, and it is the first thing to check when the data
 looks wrong.
+
+---
+
+## ADR-0019: The mock emits both possible trip update shapes
+
+**Status:** Accepted
+
+**Decision.** The mock serves trip updates in either of two shapes, selected by
+`MOCK_TRIP_UPDATE_STYLE`. `per_stop` emits a `stop_time_update` per upcoming
+stop, each with an absolute arrival time. `single_delay` emits exactly one
+`stop_time_update` carrying only a `delay`, with no arrival time.
+
+**Why.** CLAUDE.md records an explicit unverified assumption: the OneBusAway feed
+behind MTS may only include one `stop_time_update` with a `delay`, in which case
+the official ETA for downstream stops is scheduled time plus delay. That
+assumption cannot be checked until the key arrives, and the collector cannot wait
+for it. Building for one shape and guessing means a 50 percent chance of
+discovering the guess was wrong at the moment the key lands, with the schema
+already committed.
+
+Supporting both means the ingest path is exercised against either outcome now,
+and the `predictions` table holds both: `arrival_time` is nullable and
+`delay_seconds` is a separate column, so a `single_delay` feed produces a valid
+row with a null arrival and a populated delay.
+
+**Rejected.** Implementing only `per_stop`, which is the richer shape and the one
+the schema is designed around. Rejected because the cost of supporting both is
+one branch in the simulator and one test, while the cost of guessing wrong is
+reworking the schema after collection has already started, which means either
+discarding history or migrating it.
+
+**At scale.** This decision expires the moment the real `.pbtext` is fetched. At
+that point one shape is confirmed and the other becomes dead code that should be
+deleted rather than maintained, though the nullable columns stay because a real
+feed can legitimately omit an arrival time for an individual stop.
+
+---
+
+## ADR-0020: Simulated output is a pure function of the timestamp, seeded by sha256
+
+**Status:** Accepted
+
+**Decision.** Every value the simulator produces, including position, speed
+variation, standing delay bias, and prediction drift, is derived from the
+timestamp and a stable key, using sha256 rather than Python's builtin `hash` or
+a stateful random generator.
+
+**Why.** Two reasons. First, tests can assert on feed contents without
+controlling a clock or injecting a fake random source: the same instant always
+produces the same bytes. Second, `hash()` is salted per process in Python, so a
+mock built on it would emit different feeds after every restart, which would make
+a restart indistinguishable from a real change in the data and would break any
+test that compared across processes.
+
+The drift period is deliberately longer than one poll interval, and its amplitude
+deliberately spans the collector's 30 second write threshold. A mock where every
+poll changed every prediction would make change-only storage look useless; one
+where nothing changed would make it look perfect. Both would be the mock lying
+about the thing it exists to test, so there is a test asserting that revisions
+land on both sides of the threshold.
+
+**Rejected.** A seeded `random.Random` advanced per call. Simpler to write, but
+output then depends on call order, so generating one feed changes the next, and a
+test that fetches the same instant twice gets different answers.
+
+**At scale.** Determinism is the reason this mock cannot substitute for real data
+in Phase 3. Real GPS is noisy in ways that are not a pure function of anything,
+and inference tuned against smooth synthetic movement will not survive contact
+with the real feed. Recorded real fixtures are the intended complement, not a
+replacement for the simulator.

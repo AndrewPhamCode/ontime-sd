@@ -47,6 +47,35 @@ def _with_database(database_url: str, name: str) -> str:
     return urlunsplit(parts._replace(path=f"/{name}"))
 
 
+def make_settings(**overrides: object) -> Settings:
+    """Settings with every field populated, for tests that need no environment.
+
+    Kept here so a new setting only has to be defaulted in one place.
+    """
+    base: dict[str, object] = {
+        "database_url": "postgresql://u:p@localhost:5433/db",
+        "mts_api_key": "",
+        "mts_feed_base_url": "http://localhost:8081/api/api/gtfs_realtime",
+        "poll_interval_seconds": 30,
+        "prediction_change_threshold_seconds": 30,
+        "backoff_base_seconds": 1.0,
+        "backoff_max_seconds": 300.0,
+        "health_port": 8080,
+        "health_stale_after_seconds": 300,
+        "log_level": "INFO",
+        "mock_port": 0,
+        "mock_vehicle_count": 6,
+        "mock_failure_rate": 0.0,
+        "mock_slow_rate": 0.0,
+        "mock_slow_seconds": 5.0,
+        "mock_truncate_rate": 0.0,
+        "mock_feed_refresh_seconds": 30,
+        "mock_trip_update_style": "per_stop",
+    }
+    base.update(overrides)
+    return Settings(**base)  # type: ignore[arg-type]
+
+
 @pytest.fixture(scope="session")
 def settings() -> Settings:
     """Settings for tests, defaulting to the compose database."""
