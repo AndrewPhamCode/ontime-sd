@@ -680,3 +680,40 @@ restart loop that damages collection on the endpoint that is still working.
 staleness has to be alerted on separately from `poll_log`, which is what the
 CloudWatch alarms in Phase 7 and the RUNBOOK entries are for. The endpoint is a
 liveness probe, not a monitoring system.
+
+---
+
+## ADR-0023: The API key is kept out of logs, not just out of git
+
+**Status:** Accepted
+
+**Decision.** Three measures, together. `Settings.mts_api_key` is declared with
+`repr=False` so it cannot appear in a dataclass repr or a traceback. Poll failure
+logs use `redacted_feed_url`, which substitutes the key with `REDACTED`. The
+`httpx` and `httpcore` loggers are pinned to WARNING regardless of the configured
+log level.
+
+**Why.** The charter says never commit secrets, and `.env` is gitignored from the
+first commit, but git is only one of the ways a key escapes. The MTS feed passes
+the key as a URL query parameter, and httpx logs every request URL at INFO. With
+the collector running continuously under launchd and appending to
+`~/Library/Logs/ontime-sd/collector.log`, that would have written the key in
+plaintext to disk twice every 30 seconds, indefinitely, in a file no one thinks
+of as sensitive.
+
+This was found by running the collector end to end and reading its actual log
+output, not by reading the code. The lines were visible in the mock run, where
+there is no key, which is exactly why it would have been easy to ship: nothing
+looks wrong until the real key is configured.
+
+**Rejected.** Turning the log level up to WARNING globally, which would also
+silence the poll lines that are the point of having logs. Also rejected: scrubbing
+the key from log output in the formatter, which sounds thorough but is a blocklist
+of one known secret applied after the fact, and would silently stop working if the
+key were ever passed a different way.
+
+**At scale.** A URL query parameter is a poor place for a credential and this is
+mitigation, not a fix, since the key can still surface in anything else that sees
+the URL, such as an HTTP proxy or a crash reporter. Any future library that logs
+requests needs adding to the silenced list, so there is a test asserting a real
+request does not put the key in captured log output.
