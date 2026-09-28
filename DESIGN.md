@@ -163,29 +163,42 @@ how often predictions change.
 
 ---
 
-## ADR-0006: Batch writes use executemany now, with COPY to a staging table as the documented scale path
+## ADR-0006: Batch writes use a single INSERT over unnested arrays
 
-**Status:** Provisional
+**Status:** Accepted (revised during implementation)
 
-**Decision.** Insert batches with `executemany` over a prepared statement.
+**Decision.** Each batch is written with one `INSERT ... SELECT * FROM unnest($1::text[], $2::timestamptz[], ...)` carrying one array per column, with
+`ON CONFLICT DO NOTHING`.
 
-**Why.** At roughly a thousand rows per poll every 30 seconds, this is single
-digit milliseconds and is not close to being the bottleneck. Choosing the
-simpler mechanism first keeps the ingest path readable.
+**Why.** This was planned as `executemany` and changed while building it, because
+unnest turned out to be better on every axis that matters here. It is a single
+round trip rather than one per row. More importantly, Postgres reports the
+number of rows the statement actually affected, so the insert returns the count
+genuinely inserted rather than the count offered. That number is what `poll_log`
+records, which means the gap between rows offered and rows written is a direct
+measurement of deduplication doing its job. `executemany` cannot report that,
+which would have left `rows_written` as a count of attempts and made the
+change-only compression claim unmeasurable from the data.
 
-**Rejected for now.** `copy_records_to_table`, which is substantially faster.
-The obstacle is that `COPY` cannot express `ON CONFLICT DO NOTHING`, and
-conflicts are the normal case here (ADR-0004), not an edge case. The real
-version of this optimization is `COPY` into an unlogged staging table followed by
-`INSERT ... SELECT ... ON CONFLICT DO NOTHING`, which is two statements and a
-temporary table to manage. That complexity is not yet earned.
+**Rejected.** `executemany` over a prepared statement, the original plan. At a
+thousand rows per poll it is fast enough, but it reports nothing useful about
+what it did. Also rejected: `copy_records_to_table`, which is faster still but
+cannot express `ON CONFLICT DO NOTHING`, and conflicts are the normal case here
+rather than an edge case. The real version of that optimization is `COPY` into an
+unlogged staging table followed by `INSERT ... SELECT ... ON CONFLICT DO
+NOTHING`, which is two statements plus a temporary table to manage, and is not
+yet earned.
 
-**At scale.** The trigger to switch is insert latency approaching a meaningful
-fraction of the 30 second poll interval, which `poll_log.duration_ms` measures
-directly. The staging table approach is the first move; partitioning
-`vehicle_positions` by day is the second.
+**Consequences.** Duplicate keys within a single batch are collapsed in Python
+before the insert, so the reported count reflects distinct rows offered. A feed
+repeating a vehicle inside one response is an anomaly rather than an expected
+case, but it must not break the write.
 
----
+**At scale.** The trigger to move to the staging table approach is insert latency
+approaching a meaningful fraction of the poll interval, which
+`poll_log.duration_ms` measures directly. Partitioning `vehicle_positions` by day
+is the move after that. One array per column also means the parameter payload
+grows with batch size, so a very large batch would need chunking.
 
 ## ADR-0007: A poll with an unchanged feed header timestamp is skipped before parsing
 
@@ -601,3 +614,69 @@ in Phase 3. Real GPS is noisy in ways that are not a pure function of anything,
 and inference tuned against smooth synthetic movement will not survive contact
 with the real feed. Recorded real fixtures are the intended complement, not a
 replacement for the simulator.
+
+---
+
+## ADR-0021: Unusable entities are dropped and counted, never written under a guessed key
+
+**Status:** Accepted
+
+**Decision.** When a feed entity is missing something required to key it, the
+entity is skipped, a counter is incremented, and the reason is recorded in the
+JSON log line for that poll. Where a missing field has a safe substitute, the
+substitute is used and the substitution is itself reported.
+
+Specifically: a vehicle with no id falls back to the entity id, and is dropped if
+that is empty too. A vehicle with no timestamp falls back to the feed header
+timestamp, reported as `ts_from_header`. A prediction with no `stop_sequence` is
+dropped, because GTFS-Realtime permits identifying a stop by `stop_id` alone and
+resolving that to a sequence requires the static schedule, which is Phase 2.
+
+**Why.** Every one of these fields is optional in the specification, so a
+conforming feed may omit them, and the collector has to keep running when it
+does. The alternative to dropping is inventing a key, and an invented
+`stop_sequence` would corrupt the Phase 4 horizon lookup in a way that is
+invisible: the query would return a prediction for the wrong stop rather than
+returning nothing. Silent wrong answers are worse than a recorded gap.
+
+Counting rather than merely skipping is the other half of the decision. A drop
+that leaves no trace is indistinguishable from a feed that simply had less data,
+which would make a parser regression impossible to notice.
+
+**Rejected.** Failing the whole poll when any entity is unusable, which would let
+one malformed record discard several hundred good ones. Also rejected: writing
+partial rows with nulls in the key columns, which the primary key forbids anyway,
+and which would have meant dropping the primary key.
+
+**At scale.** `ts_from_header` is the fallback that most deserves watching: it is
+safe for deduplication but it collapses every vehicle in a poll onto a single
+instant, which would bias the Phase 3 interpolation that assumes per vehicle
+report times. If it ever appears against the real feed it needs investigating
+rather than tolerating. The `no_stop_sequence` counter is the direct signal for
+whether Phase 2 is a prerequisite for Phase 4 or merely useful to it.
+
+---
+
+## ADR-0022: The health endpoint reports unhealthy only when every feed is stale
+
+**Status:** Accepted
+
+**Decision.** `/healthz` returns 503 when no feed has succeeded within
+`HEALTH_STALE_AFTER_SECONDS`, and 200 when at least one has. A single failing
+feed does not make the process unhealthy.
+
+**Why.** This endpoint answers one question: should a supervisor restart this
+process. One feed succeeding proves the process is alive and that its event loop,
+network, and database all work, so a restart would fix nothing and would throw
+away the in memory prediction cache plus any poll in flight. A single feed
+failing is a data quality problem, and `poll_log` already records it per feed
+with a status and an HTTP code, which is the right place to notice it.
+
+**Rejected.** Requiring every feed to be healthy. That conflates two different
+questions, and under it a sustained outage on one MTS endpoint would cause a
+restart loop that damages collection on the endpoint that is still working.
+
+**At scale.** This means the endpoint cannot be the only alert. Per feed
+staleness has to be alerted on separately from `poll_log`, which is what the
+CloudWatch alarms in Phase 7 and the RUNBOOK entries are for. The endpoint is a
+liveness probe, not a monitoring system.

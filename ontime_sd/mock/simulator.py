@@ -22,11 +22,10 @@ import math
 import struct
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 from google.transit import gtfs_realtime_pb2 as gtfs_rt
 
-SERVICE_TZ = ZoneInfo("America/Los_Angeles")
+from ontime_sd.config import SERVICE_TZ
 
 # A plausible north-south corridor, downtown San Diego up to UCSD. Real
 # coordinates so that anything plotted on a map looks sane, but this is not a
