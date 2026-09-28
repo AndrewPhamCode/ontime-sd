@@ -5,14 +5,21 @@ is Andrew.
 
 ## What this is
 
-One process, `ontime-collector`, polling two MTS GTFS-Realtime feeds every 30
-seconds and writing to Postgres. It runs under launchd on Andrew's Mac and is
-expected never to stop, because Phase 5 needs weeks of history and history cannot
-be backfilled.
+Two launchd agents on Andrew's Mac.
+
+`sd.ontime.collector` polls two MTS GTFS-Realtime feeds every 30 seconds and
+writes to Postgres. It is expected never to stop, because Phase 5 needs weeks of
+history and history cannot be backfilled.
+
+`sd.ontime.gtfs` loads the static schedule, Sundays at 03:30. It is a job that
+finishes, and it is deliberately a separate agent so that a loader failure or a
+malformed feed cannot disturb collection. See ADR-0031.
 
 - Vehicle positions go to `vehicle_positions`, stored losslessly.
 - Official MTS predictions go to `predictions`, stored change-only.
 - Every poll attempt, including skips and failures, goes to `poll_log`.
+- The static schedule goes to the GTFS tables, keyed by `feed_version`, and every
+  load attempt goes to `gtfs_load_log`.
 
 Database: Postgres 16 in Docker Compose on host port 5433. Docker Desktop must be
 running, and set to start at login, or the collector cannot reach it.
@@ -20,9 +27,10 @@ running, and set to start at login, or the collector cannot reach it.
 ## First checks, in order
 
 ```
-make service-status     # is launchd running it
-make health             # what the process thinks of itself
-make coverage           # what the data says actually happened
+make service-status     # is launchd running them
+make health             # what the collector thinks of itself
+make coverage           # what the realtime data says actually happened
+make schedule           # which feed versions are loaded, and recent load runs
 make service-logs       # JSON logs, one object per line
 ```
 
@@ -126,6 +134,59 @@ Vehicle positions are the bulk of it and are stored losslessly on purpose, since
 they are the ground truth for Phase 3. Do not delete them to free space. Move the
 volume or add disk.
 
+### The schedule is expired or missing
+
+`make schedule` ends with a status line. `NO SCHEDULE LOADED` or `EXPIRED` means
+Phase 3 and 4 cannot resolve trips, because the feed's `feed_end_date` has passed
+and trips running today may not exist in any loaded version.
+
+```
+make load-gtfs          # safe any time, skips when the feed is unchanged
+make load-gtfs-force    # reload the same bytes in place
+```
+
+The loader is idempotent. It does a HEAD request first and does nothing when
+`Last-Modified` and `Content-Length` are unchanged, so running it by hand costs
+almost nothing.
+
+### The weekly load keeps failing
+
+Check `make schedule` for the status and error of recent attempts.
+
+- `http_error` with a status: MTS side, or the URL moved. Confirm by hand:
+  `curl -sSI https://www.sdmts.com/google_transit_files/google_transit.zip`
+- `http_error` with no status: network or DNS. Nothing to do but retry.
+- `parse_error`: the archive downloaded but is not the GTFS this project expects,
+  either truncated or genuinely changed. The message names the offending value.
+  Run `uv run pytest -m network` to check the real feed against the assumptions
+  the design rests on. If MTS changed the feed shape, `DESIGN.md` ADR-0025 and
+  ADR-0026 need revisiting before trusting a load.
+- `db_error`: Docker Desktop or Postgres. `make up`.
+
+A failed load changes nothing. The load is one transaction, so the previous
+version stays in place and the next run simply tries again. There is never a
+partially loaded schedule.
+
+### Every weekly run says skipped_unchanged
+
+That is the healthy steady state, not a problem. MTS republishes roughly monthly,
+so most weekly runs correctly have nothing to do. What would be wrong is no rows
+at all in `gtfs_load_log`, which means the agent is not running:
+`make service-status`.
+
+### The schedule tables are getting large
+
+Expected. Every load keeps its own copy, about 1.62M rows, because Phase 4 has to
+compare a prediction against the schedule that was in effect when it was made
+(ADR-0024). At MTS's cadence that is roughly 20M rows a year.
+
+Do not delete old versions while Phase 4 results depend on them. When pruning is
+genuinely needed, one delete does it and the cascade takes the rest:
+
+```
+delete from feed_versions where feed_version = '<sha256>';
+```
+
 ## When the MTS API key arrives
 
 This is the one planned change to make immediately, because a design assumption
@@ -146,7 +207,10 @@ depends on it.
    real feed identifies stops by `stop_id` without a sequence, predictions are
    being dropped and Phase 2 becomes a hard prerequisite for Phase 4 rather than
    just a useful step.
-5. Restart the collector: `make service-install` reinstalls and restarts it.
+5. Restart the collector: `make service-install` reinstalls and restarts both
+   agents.
+6. Make sure a schedule is loaded before relying on Phase 3 or 4:
+   `make schedule` should say `current`.
 
 Never commit the key. It belongs only in `.env`, which is gitignored.
 
