@@ -68,6 +68,11 @@ class Settings:
     mock_port: int
     mock_vehicle_count: int
     mock_failure_rate: float
+    mock_slow_rate: float
+    mock_slow_seconds: float
+    mock_truncate_rate: float
+    mock_feed_refresh_seconds: int
+    mock_trip_update_style: str
 
     @classmethod
     def from_env(cls, *, load_env_file: bool = True) -> Settings:
@@ -99,6 +104,11 @@ class Settings:
             mock_port=_env_int("MOCK_PORT", 8081),
             mock_vehicle_count=_env_int("MOCK_VEHICLE_COUNT", 40),
             mock_failure_rate=_env_float("MOCK_FAILURE_RATE", 0.0),
+            mock_slow_rate=_env_float("MOCK_SLOW_RATE", 0.0),
+            mock_slow_seconds=_env_float("MOCK_SLOW_SECONDS", 5.0),
+            mock_truncate_rate=_env_float("MOCK_TRUNCATE_RATE", 0.0),
+            mock_feed_refresh_seconds=_env_int("MOCK_FEED_REFRESH_SECONDS", 30),
+            mock_trip_update_style=os.environ.get("MOCK_TRIP_UPDATE_STYLE", "per_stop").strip(),
         )
         settings.validate()
         return settings
@@ -112,8 +122,17 @@ class Settings:
             raise ValueError("BACKOFF_BASE_SECONDS must be positive")
         if self.backoff_max_seconds < self.backoff_base_seconds:
             raise ValueError("BACKOFF_MAX_SECONDS must be at least BACKOFF_BASE_SECONDS")
-        if not 0.0 <= self.mock_failure_rate <= 1.0:
-            raise ValueError("MOCK_FAILURE_RATE must be between 0.0 and 1.0")
+        for name, rate in (
+            ("MOCK_FAILURE_RATE", self.mock_failure_rate),
+            ("MOCK_SLOW_RATE", self.mock_slow_rate),
+            ("MOCK_TRUNCATE_RATE", self.mock_truncate_rate),
+        ):
+            if not 0.0 <= rate <= 1.0:
+                raise ValueError(f"{name} must be between 0.0 and 1.0")
+        if self.mock_feed_refresh_seconds <= 0:
+            raise ValueError("MOCK_FEED_REFRESH_SECONDS must be positive")
+        if self.mock_trip_update_style not in ("per_stop", "single_delay"):
+            raise ValueError("MOCK_TRIP_UPDATE_STYLE must be per_stop or single_delay")
 
     @property
     def using_mock_feed(self) -> bool:
