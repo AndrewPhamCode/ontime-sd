@@ -39,6 +39,10 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Database fixtures and the tests that use them must share one event loop,
+# because an asyncpg pool is bound to the loop that created it.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
 # Fail loudly instead of hanging if a test waits on a feed or the database.
 timeout = 60
