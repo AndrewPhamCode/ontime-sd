@@ -75,4 +75,28 @@ Derive the ground truth: when did each vehicle actually arrive at each stop?
 - `DESIGN.md` (decisions and rejected alternatives) and `RUNBOOK.md` (alerts and what to do).
 
 ## Commands
-(Fill in as they're created: `make test`, `make up`, `make mock`, etc.)
+
+`make help` lists everything. The ones used most:
+
+| Command | What it does |
+| --- | --- |
+| `make install` | Sync the venv from pyproject.toml (uv) |
+| `make up` / `make down` | Start / stop Postgres 16 in Docker on host port **5433** |
+| `make migrate` | Apply pending SQL migrations |
+| `make mock` | Run the mock GTFS-Realtime feed server |
+| `make run` | Run the collector against whatever `MTS_FEED_BASE_URL` points at |
+| `make test` | Full suite against a real Postgres |
+| `make lint` / `make fmt` | ruff check and format |
+| `make psql` | psql shell on the compose database |
+| `make health` | Hit the collector `/healthz` endpoint |
+| `make coverage` | Poll outcomes, collection gaps, and compression ratio from `poll_log` |
+| `make service-install` | Install and start the launchd agent for 24/7 collection |
+| `make service-uninstall` | Stop and remove the launchd agent |
+| `make service-status` | Whether launchd is running the collector |
+| `make service-logs` | Follow the JSON collector log |
+
+Port 5433, not 5432, because a Homebrew `postgresql@16` instance already owns
+5432 on the dev machine. See DESIGN.md ADR-0001.
+
+Docs: `DESIGN.md` for why each decision was made and what was rejected,
+`RUNBOOK.md` for what to do when something breaks.
