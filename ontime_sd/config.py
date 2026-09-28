@@ -11,8 +11,12 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
+
+# GTFS service days are defined in the agency timezone, per CLAUDE.md.
+SERVICE_TZ = ZoneInfo("America/Los_Angeles")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = PROJECT_ROOT / "migrations"
