@@ -42,6 +42,10 @@ class Response:
     status: int = 200
     body: bytes = b""
     content_type: str = "text/plain; charset=utf-8"
+    # Extra headers, which override the defaults when they collide. Needed for
+    # things only the handler knows, such as Last-Modified, and for HEAD replies
+    # that must declare a Content-Length without carrying a body.
+    headers: tuple[tuple[str, str], ...] = ()
 
 
 Handler = Callable[[Request], Awaitable[Response]]
@@ -49,14 +53,21 @@ Handler = Callable[[Request], Awaitable[Response]]
 
 def _render(response: Response) -> bytes:
     reason = _REASONS.get(response.status, "Unknown")
-    headers = (
-        f"HTTP/1.1 {response.status} {reason}\r\n"
-        f"Content-Type: {response.content_type}\r\n"
-        f"Content-Length: {len(response.body)}\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-    )
-    return headers.encode("latin-1") + response.body
+
+    # Case insensitive merge, so an explicit header replaces the default rather
+    # than being sent alongside it.
+    fields: dict[str, tuple[str, str]] = {
+        "content-type": ("Content-Type", response.content_type),
+        "content-length": ("Content-Length", str(len(response.body))),
+        "connection": ("Connection", "close"),
+    }
+    for name, value in response.headers:
+        fields[name.lower()] = (name, value)
+
+    lines = [f"HTTP/1.1 {response.status} {reason}"]
+    lines += [f"{name}: {value}" for name, value in fields.values()]
+    head = "\r\n".join(lines) + "\r\n\r\n"
+    return head.encode("latin-1") + response.body
 
 
 async def _handle_connection(

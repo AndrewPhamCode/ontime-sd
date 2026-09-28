@@ -56,6 +56,7 @@ def make_settings(**overrides: object) -> Settings:
         "database_url": "postgresql://u:p@localhost:5433/db",
         "mts_api_key": "",
         "mts_feed_base_url": "http://localhost:8081/api/api/gtfs_realtime",
+        "gtfs_static_url": "https://example.test/google_transit.zip",
         "poll_interval_seconds": 30,
         "prediction_change_threshold_seconds": 30,
         "backoff_base_seconds": 1.0,
