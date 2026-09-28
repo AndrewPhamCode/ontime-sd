@@ -648,6 +648,11 @@ one malformed record discard several hundred good ones. Also rejected: writing
 partial rows with nulls in the key columns, which the primary key forbids anyway,
 and which would have meant dropping the primary key.
 
+**Update after Phase 2.** Both fallbacks are now fixable. `service_dates` and
+`stop_times` provide what is needed to resolve a service day properly and to look
+up a `stop_sequence` from a `stop_id`. The repair is deliberately deferred to
+Phases 3 and 4 rather than forgotten, for the reasons in ADR-0032.
+
 **At scale.** `ts_from_header` is the fallback that most deserves watching: it is
 safe for deduplication but it collapses every vehicle in a poll onto a single
 instant, which would bias the Phase 3 interpolation that assumes per vehicle
@@ -717,3 +722,288 @@ mitigation, not a fix, since the key can still surface in anything else that see
 the URL, such as an HTTP proxy or a crash reporter. Any future library that logs
 requests needs adding to the silenced list, so there is a test asserting a real
 request does not put the key in captured log output.
+
+---
+
+## ADR-0024: Every static row is tagged with feed_version, and versions are retained
+
+**Status:** Accepted
+
+**Decision.** Every static GTFS table is keyed on `feed_version` first, where
+`feed_version` is the sha256 of the downloaded zip. Old versions are never deleted
+by the loader. A `feed_versions` registry holds the download metadata and
+`loaded_at`.
+
+**Why.** MTS republishes this feed periodically, and a trip's stops and times can
+change between publications. Phase 4 compares what MTS predicted against what
+happened, which only means something if the schedule used is the one that was in
+effect at the time. With a single current schedule, an evaluation run today and
+the same run next month would silently produce different numbers from the same
+collected data, and there would be no way to tell which was right. The project
+metric has to be reproducible or it is not a metric.
+
+The sha256 is the key rather than MTS's own `feed_info.feed_version` string, which
+is free text ("Generated on 20260521 @ 1307142 merged with...") and carries no
+uniqueness guarantee. MTS's string is stored alongside it, because that is what
+MTS support would ask about.
+
+**Rejected.** Replacing the whole schedule on each load. Simpler queries, no
+`feed_version` in any join, smaller database. Rejected because it makes historical
+analysis irreproducible, which is the one thing Phase 4 cannot give up. Also
+rejected: keeping versions but pruning old ones on a schedule, which adds a
+retention job to build and reason about before there is any evidence growth is a
+problem.
+
+**At scale.** A full load is about 1.62M rows, measured. At MTS's roughly monthly
+cadence that is around 20M rows a year, which is unremarkable for Postgres but
+does mean every Phase 3 and 4 query must filter on `feed_version` or it will read
+every version at once. Foreign keys cascade from `feed_versions`, so pruning a
+version later is a single delete.
+
+---
+
+## ADR-0025: GTFS times are stored as integer seconds past service-day midnight
+
+**Status:** Accepted
+
+**Decision.** `stop_times.arrival_seconds` and `departure_seconds` are integers
+counting from service-day midnight, and may exceed 86400.
+
+**Why.** GTFS times are relative to the service day, not the calendar day, so a
+trip that departs at 11:30pm and arrives after midnight has an arrival time of
+24:30:00 or later. This is not a theoretical edge case: in the feed measured while
+building this, **11,432 `stop_times` rows are at hour 24 or later** and the
+largest value is 27:36:00. A `time` column cannot represent any of them, and a
+`timestamp` would require inventing a date before the service day is known.
+
+Integers also make the arithmetic Phase 3 and 4 need trivial. Travel time between
+two stops is a subtraction, with no timezone or daylight saving handling in the
+hot path.
+
+**Rejected.** `time` columns, which cannot hold 27:36:00 at all. `interval`, which
+can, but is heavier and invites accidental mixing with timestamps. Storing the
+original `HH:MM:SS` text and parsing at query time, which pushes a parse into
+every consumer and makes indexing useless.
+
+**At scale.** Converting a service-day offset to an absolute instant still needs
+the service date and the agency timezone, which is why `service_dates` exists and
+why the conversion belongs in one place rather than in each caller. Daylight
+saving means a service day is not always 86400 seconds long, and that correction
+is Phase 3's problem to handle explicitly rather than something this
+representation can hide.
+
+---
+
+## ADR-0026: shape_dist_traveled is converted from miles to metres at load time
+
+**Status:** Accepted
+
+**Decision.** `shape_dist_traveled` from both `shapes.txt` and `stop_times.txt` is
+multiplied by 1609.344 and stored as `shape_dist_traveled_m`.
+
+**Why.** The GTFS specification does not mandate a unit for this field, so it had
+to be determined rather than assumed. Summing haversine distance along the six
+longest shapes and comparing against the declared value matched to 0.0%: shape
+`891_2_11` measures 142.00 km, or 88.23 miles, and declares 88.22. It is miles.
+
+Converting at load means one unit exists in the database. Phase 3 computes
+distances between GPS points, which is naturally metres, and then compares them to
+stop positions along the shape. A unit mismatch there is a factor of 1609 and it
+would not look like a unit error, it would look like vehicles teleporting or never
+reaching their stops, discovered deep inside inference rather than at the boundary.
+
+**Rejected.** Storing the source value unchanged and converting in each consumer,
+which is the same decision made once per caller instead of once in total, with the
+failure mode being silent. Also rejected: storing both, which doubles the chance
+of a query picking the wrong column.
+
+**At scale.** This assumes MTS keeps publishing miles. The `network` marked test
+checks the real feed still has the column, but not the unit, because that needs the
+geometric comparison. If MTS ever switched to metres the loader would silently
+inflate every distance by 1609, so the geometry check belongs in the verification
+step of any future feed format change.
+
+---
+
+## ADR-0027: service_dates is materialized at load rather than computed per query
+
+**Status:** Accepted
+
+**Decision.** At load time, expand `calendar.txt` weekday patterns across their
+date ranges, apply `calendar_dates.txt` exceptions, and store the result as
+explicit `(feed_version, service_date, service_id)` rows.
+
+**Why.** "Which trips ran on this date" is the single most common question Phases 3
+and 4 ask, and answering it from the raw GTFS tables means reimplementing weekday
+bitmap expansion plus two kinds of exception in every query that asks. That logic
+is easy to get subtly wrong in ways nothing notices: an exclusive range boundary,
+or exceptions applied in the wrong order. Doing it once, in one tested function,
+means every caller gets the same answer.
+
+It is also cheap. The real feed expands to 3,582 rows, which is nothing, and the
+work happens once per load instead of once per query.
+
+Correctness was verified against the real feed rather than only against fixtures:
+a Sunday-only service expanded to 13 dates, all Sundays, and independently MTS's
+own `service_name` field for that service reads "13 Su". Every
+`exception_type=2` date is absent from the result and every `exception_type=1`
+date is present.
+
+**Rejected.** A SQL view, which keeps the logic in one place but re-runs the
+expansion on every query and cannot be indexed usefully. A helper function in
+Python that callers must remember to use, which is a convention rather than a
+guarantee.
+
+**At scale.** These rows are derived, so they must be rebuilt whenever a feed
+version is loaded and never edited by hand. A service defined purely through
+`calendar_dates` with no `calendar.txt` row is handled, because a feed is allowed
+to express service that way.
+
+---
+
+## ADR-0028: Bulk loading uses copy_records_to_table over a lazy generator, in chunks
+
+**Status:** Accepted
+
+**Decision.** Rows are transformed in Python generators and loaded with
+`asyncpg.copy_records_to_table` in batches of 50,000.
+
+**Why.** `stop_times.txt` is 74 MB and 1.37M rows, so nothing may hold the file in
+memory. `zipfile` plus `csv.DictReader` streams it, the mapper is a generator
+expression, and the chunker pulls only enough rows to fill one batch, so peak
+memory is a function of the chunk size and not of the feed. The measured load is
+1.62M rows in 16.6 seconds.
+
+Chunking rather than handing the whole generator to one COPY call bounds memory
+explicitly rather than depending on the driver's internal buffering, and gives a
+natural place to report progress per table.
+
+**Rejected.** `executemany`, which is one round trip per row and would take
+minutes rather than seconds at this size. COPY of the raw CSV into a staging table
+followed by a SQL transform, which is fast and keeps the work in the database, but
+puts the time and unit conversions in SQL where they cannot be unit tested. Those
+two conversions are the only real logic in the loader and they carry the
+consequences described in ADR-0025 and ADR-0026, so they belong in tested Python
+functions.
+
+**At scale.** One array of records per chunk means the parameter payload is bounded
+by chunk size, so a much larger feed needs no change. If load time ever matters,
+the next move is dropping the secondary indexes before the load and rebuilding
+them after, which is a bigger change than it sounds because it must stay inside the
+one transaction.
+
+---
+
+## ADR-0029: A feed version loads in a single transaction
+
+**Status:** Accepted
+
+**Decision.** The `feed_versions` insert, every table's COPY, the `service_dates`
+expansion, and the final `loaded_at` update all happen in one transaction.
+
+**Why.** A partially loaded schedule is worse than no schedule, because it looks
+like data rather than like a failure. Trips present without their stop times would
+make Phase 3 silently skip trips, and the symptom would appear as missing arrivals
+rather than as a loader error. All or nothing removes that state from existing.
+
+It also makes retries free. A failed load leaves the previous version in place and
+untouched, so the scheduled job can simply try again next week, and a malformed
+feed from MTS costs nothing but a `gtfs_load_log` row.
+
+**Consequences.** `loaded_at` is set inside the same transaction, so it is never
+observably null: a crash leaves no row at all rather than a row marked unloaded.
+That is stronger than the half loaded detection originally planned, and the
+column's remaining value is recording when the load completed. This differs from
+the Phase 2 plan, which expected to observe a null `loaded_at` after a kill, and
+the plan was wrong rather than the implementation.
+
+**At scale.** One transaction inserting 1.62M rows holds a snapshot and generates
+WAL for its duration, measured at under 17 seconds. That is acceptable weekly. If
+a feed ever grew large enough that the transaction duration interfered with
+autovacuum or replication, loading into per version partitions and attaching them
+would be the way out.
+
+---
+
+## ADR-0030: Only the GTFS files the metric needs are loaded
+
+**Status:** Accepted
+
+**Decision.** `agency`, `routes`, `stops`, `trips`, `stop_times`, `shapes`,
+`calendar`, and `calendar_dates` are loaded. `fare_attributes`, `fare_rules`,
+`fare_media`, `fare_products`, `fare_leg_rules`, `fare_transfer_rules`,
+`fare_capping`, `rider_categories`, `transfers`, `networks`, and
+`route_networks` are ignored.
+
+**Why.** None of them affect when a bus arrives, which is the only question this
+project answers. Loading them would add tables to migrate, map, and test for no
+movement toward the metric.
+
+**Rejected.** Loading the whole archive for completeness. There is a real argument
+for it, that the data is already downloaded and a future feature might want fares,
+but that is speculative and the cost is paid now.
+
+**At scale.** Adding one later is a migration plus a `TableSpec` entry, because the
+loader is driven by a table of specs rather than by hand written code per file.
+`transfers.txt` is the most likely future addition, since transfer time matters for
+trip planning, though not for arrival prediction.
+
+---
+
+## ADR-0031: The schedule refresh is a separate scheduled agent, not part of the collector
+
+**Status:** Accepted
+
+**Decision.** A second launchd agent runs the loader on a weekly schedule, with
+its own `gtfs_load_log` table, separate from the collector process.
+
+**Why.** The collector is the process that must never stop, because the realtime
+data it captures cannot be recovered later. The loader runs once a week, handles an
+8 MB download, and holds a long transaction. Putting that work inside the collector
+would mean a loader bug, a malformed feed from MTS, or a long running transaction
+could disturb collection, and there is no upside to the coupling: the two have
+nothing in common except the database.
+
+Separate logs for the same reason as ADR-0018. A loader that quietly stopped
+running looks exactly like a feed that never changed, unless the skipped runs are
+recorded as well as the successful ones.
+
+**Rejected.** A periodic task inside the collector, which shares a failure domain
+for no benefit. A manual command only, which is simplest and was the original
+recommendation, but leaves the schedule silently stale as soon as anyone forgets.
+Cron, which has no supervision and no logging story.
+
+**At scale.** Two unattended agents on a development laptop is the real cost here,
+and both inherit the sleep gap problem from ADR-0015. A missed weekly run matters
+far less than a missed poll, since the schedule changes monthly at most, and
+launchd fires a missed calendar interval once the machine wakes.
+
+---
+
+## ADR-0032: Phase 2 is a pure loader and changes nothing about realtime interpretation
+
+**Status:** Accepted
+
+**Decision.** Phase 2 downloads, parses, and loads. It does not change the
+collector, and it does not reinterpret any already collected row.
+
+**Why.** Loading the schedule makes two documented gaps fixable, both from
+ADR-0021: a trip's service day can now be resolved properly instead of inferred
+from the observation time, and a `stop_id` with no `stop_sequence` can now be
+looked up in `stop_times`. Both are tempting to fix here and both are the wrong
+thing to do in this phase.
+
+They are not mechanical lookups, they are judgment calls about real feed behaviour
+that cannot be made until the API key arrives and the actual trip update shape is
+known. They also belong to arrival inference and evaluation, which are Phases 3 and
+4, and which Andrew writes himself. Doing them here would mean guessing now and
+constraining those phases to the guess.
+
+**Rejected.** Wiring the lookups into the collector's parse path immediately, which
+would reduce dropped rows from the moment the key arrives, at the cost of deciding
+inference semantics inside a loader PR.
+
+**At scale.** The `no_stop_sequence` counter in the collector logs is now the
+signal that decides how urgent this is. If the real feed never omits
+`stop_sequence`, the repair is unnecessary. If it always does, Phase 2 becomes a
+hard prerequisite for Phase 4 rather than merely useful to it.

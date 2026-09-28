@@ -14,6 +14,7 @@ dependencies = [
 ontime-collector = "ontime_sd.collector:main"
 ontime-mock = "ontime_sd.mock.server:main"
 ontime-migrate = "ontime_sd.db:migrate_main"
+ontime-load-gtfs = "ontime_sd.gtfs_load:main"
 
 [dependency-groups]
 dev = [
@@ -41,6 +42,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 # Literal GTFS CSV content. A header line cannot be wrapped without
 # changing the bytes the test is asserting on.
 "tests/gtfs_fixtures.py" = ["E501"]
+"tests/test_gtfs_service_dates.py" = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
