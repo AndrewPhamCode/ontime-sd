@@ -37,6 +37,11 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "RUF"]
 
+[tool.ruff.lint.per-file-ignores]
+# Literal GTFS CSV content. A header line cannot be wrapped without
+# changing the bytes the test is asserting on.
+"tests/gtfs_fixtures.py" = ["E501"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 # Database fixtures and the tests that use them must share one event loop,
@@ -47,3 +52,7 @@ testpaths = ["tests"]
 # Fail loudly instead of hanging if a test waits on a feed or the database.
 timeout = 60
 filterwarnings = ["error::DeprecationWarning"]
+# The network marker hits the real MTS feed. Deselected by default so the
+# suite stays fast and works offline; run it with `pytest -m network`.
+markers = ["network: contacts the real MTS GTFS feed"]
+addopts = ["-m", "not network"]

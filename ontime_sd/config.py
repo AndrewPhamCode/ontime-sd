@@ -62,6 +62,7 @@ class Settings:
     # repr is suppressed so the key cannot leak into a log line or traceback.
     mts_api_key: str = field(repr=False)
     mts_feed_base_url: str
+    gtfs_static_url: str
     poll_interval_seconds: int
     prediction_change_threshold_seconds: int
     backoff_base_seconds: float
@@ -98,6 +99,10 @@ class Settings:
             )
             .strip()
             .rstrip("/"),
+            gtfs_static_url=os.environ.get(
+                "GTFS_STATIC_URL",
+                "https://www.sdmts.com/google_transit_files/google_transit.zip",
+            ).strip(),
             poll_interval_seconds=_env_int("POLL_INTERVAL_SECONDS", 30),
             prediction_change_threshold_seconds=_env_int("PREDICTION_CHANGE_THRESHOLD_SECONDS", 30),
             backoff_base_seconds=_env_float("BACKOFF_BASE_SECONDS", 1.0),
