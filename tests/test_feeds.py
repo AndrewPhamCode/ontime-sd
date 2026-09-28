@@ -184,11 +184,13 @@ def test_unparseable_start_date_falls_back_to_the_service_day() -> None:
     assert parsed.positions[0].start_date == date(2026, 9, 27)
 
 
-def test_prediction_without_stop_sequence_is_dropped_not_guessed() -> None:
-    """stop_sequence is part of the primary key and cannot be invented.
+def test_prediction_without_stop_sequence_is_kept_for_resolution() -> None:
+    """The real MTS feed never sends stop_sequence, only stop_id.
 
-    Resolving a stop_id to a sequence needs the static schedule, which is
-    Phase 2. Writing a guessed key would corrupt the Phase 4 lookup.
+    Dropping these would discard every prediction MTS publishes, which is exactly
+    what happened before this was measured against the real feed. The row is kept
+    unresolved and the sequence is recovered from the static schedule before it is
+    written. See ADR-0033.
     """
     message = _message()
     entity = message.entity.add()
@@ -201,9 +203,64 @@ def test_prediction_without_stop_sequence_is_dropped_not_guessed() -> None:
     stop_time.arrival.time = NOW_EPOCH + 300
 
     parsed = extract_predictions(message)
+
+    assert parsed.dropped == 0
+    assert len(parsed.predictions) == 1
+    row = parsed.predictions[0]
+    assert row.stop_sequence is None
+    assert row.resolved is False
+    assert row.stop_id == "STOP_ONLY"
+
+
+def test_explicit_stop_sequence_is_used_when_present() -> None:
+    """A feed that does send it must be unaffected by the resolution path."""
+    message = _message()
+    entity = message.entity.add()
+    entity.id = "tu-1"
+    entity.trip_update.trip.trip_id = "trip-1"
+    entity.trip_update.trip.start_date = "20260927"
+    entity.trip_update.timestamp = NOW_EPOCH
+    stop_time = entity.trip_update.stop_time_update.add()
+    stop_time.stop_sequence = 7
+    stop_time.stop_id = "STOP_A"
+    stop_time.arrival.time = NOW_EPOCH + 300
+
+    row = extract_predictions(message).predictions[0]
+    assert row.stop_sequence == 7
+    assert row.resolved is True
+
+
+def test_feed_order_records_position_within_the_trip() -> None:
+    """Alignment depends on this ordering, so it must survive extraction."""
+    message = _message()
+    entity = message.entity.add()
+    entity.id = "tu-1"
+    entity.trip_update.trip.trip_id = "trip-1"
+    entity.trip_update.trip.start_date = "20260927"
+    entity.trip_update.timestamp = NOW_EPOCH
+    for i, stop_id in enumerate(["a", "b", "c"]):
+        stop_time = entity.trip_update.stop_time_update.add()
+        stop_time.stop_id = stop_id
+        stop_time.arrival.time = NOW_EPOCH + 60 * (i + 1)
+
+    rows = extract_predictions(message).predictions
+    assert [(r.stop_id, r.feed_order) for r in rows] == [("a", 0), ("b", 1), ("c", 2)]
+
+
+def test_prediction_with_no_stop_identity_at_all_is_dropped() -> None:
+    """Neither a sequence nor a stop_id means the row cannot be keyed."""
+    message = _message()
+    entity = message.entity.add()
+    entity.id = "tu-1"
+    entity.trip_update.trip.trip_id = "trip-1"
+    entity.trip_update.trip.start_date = "20260927"
+    entity.trip_update.timestamp = NOW_EPOCH
+    stop_time = entity.trip_update.stop_time_update.add()
+    stop_time.arrival.time = NOW_EPOCH + 300
+
+    parsed = extract_predictions(message)
     assert parsed.predictions == ()
-    assert parsed.dropped == 1
-    assert "no_stop_sequence" in parsed.drop_reasons
+    assert "no_stop_identity" in parsed.drop_reasons
 
 
 def test_prediction_with_no_content_is_dropped() -> None:

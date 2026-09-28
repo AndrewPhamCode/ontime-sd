@@ -575,10 +575,11 @@ one branch in the simulator and one test, while the cost of guessing wrong is
 reworking the schema after collection has already started, which means either
 discarding history or migrating it.
 
-**At scale.** This decision expires the moment the real `.pbtext` is fetched. At
-that point one shape is confirmed and the other becomes dead code that should be
-deleted rather than maintained, though the nullable columns stay because a real
-feed can legitimately omit an arrival time for an individual stop.
+**Resolved.** The real feed was fetched and it sends **per stop arrival times**,
+averaging 17.1 stop time updates per trip. The `single_delay` shape does not occur
+and is dead code to be removed rather than maintained. The nullable columns stay,
+because the real feed does legitimately omit an arrival time for some stops: 54 of
+7,750 carried a departure only. See ADR-0033.
 
 ---
 
@@ -648,10 +649,13 @@ one malformed record discard several hundred good ones. Also rejected: writing
 partial rows with nulls in the key columns, which the primary key forbids anyway,
 and which would have meant dropping the primary key.
 
-**Update after Phase 2.** Both fallbacks are now fixable. `service_dates` and
-`stop_times` provide what is needed to resolve a service day properly and to look
-up a `stop_sequence` from a `stop_id`. The repair is deliberately deferred to
-Phases 3 and 4 rather than forgotten, for the reasons in ADR-0032.
+**Update after the key arrived.** The `no_stop_sequence` case turned out to be
+the norm rather than an edge case: the real feed never sends `stop_sequence`, so
+this fallback was discarding 100% of predictions. It is now resolved at ingest by
+ADR-0033. The `start_date` fallback also applies universally, since the real feed
+omits `start_date` on every entity, so every service day is currently inferred from
+the observation time. That remains wrong for a trip observed after midnight and is
+Phase 3 work.
 
 **At scale.** `ts_from_header` is the fallback that most deserves watching: it is
 safe for deduplication but it collapses every vehicle in a poll onto a single
@@ -1003,7 +1007,79 @@ constraining those phases to the guess.
 would reduce dropped rows from the moment the key arrives, at the cost of deciding
 inference semantics inside a loader PR.
 
-**At scale.** The `no_stop_sequence` counter in the collector logs is now the
-signal that decides how urgent this is. If the real feed never omits
-`stop_sequence`, the repair is unnecessary. If it always does, Phase 2 becomes a
-hard prerequisite for Phase 4 rather than merely useful to it.
+**Outcome.** The real feed always omits `stop_sequence`, so the second case is
+what happened: Phase 2 is a hard prerequisite, and the repair became urgent rather
+than deferred. It is implemented in ADR-0033. The service day repair is still
+deferred to Phase 3 as originally intended.
+
+---
+
+## ADR-0033: stop_sequence is recovered by aligning the feed's stop order against the schedule
+
+**Status:** Accepted
+
+**Decision.** The real MTS trip update feed never sends `stop_sequence`. It is
+recovered at ingest by walking the feed's ordered `stop_id` list against that
+trip's scheduled `stop_times` in order, never going backwards, and taking the next
+matching stop at or after the current position. Rows that cannot be aligned are
+dropped and counted by reason.
+
+**Why.** This was measured against the real feed the day the API key arrived, and
+the measurement inverted an assumption the project had been carrying.
+
+CLAUDE.md recorded an unverified assumption that the OneBusAway feed might send a
+single `stop_time_update` with a `delay`. It does not: it sends per stop arrival
+times, averaging 17.1 stop time updates per trip across 452 trips. That part was
+good news and confirmed the `predictions` schema.
+
+The bad news was that `stop_sequence` appears zero times in the entire feed, and it
+is part of the `predictions` primary key. Running the existing parser against the
+real feed extracted **0 rows and dropped 7,751**, every one for `no_stop_sequence`.
+Every prediction MTS publishes was being discarded. This is the risk ADR-0021
+flagged and ADR-0032 said would determine whether Phase 2 was merely useful or a
+hard prerequisite. It is a hard prerequisite.
+
+`stop_id` alone cannot substitute for the sequence. Measured against the loaded
+schedule, **3,350 trips (7.2%) call at the same stop twice**: trip 19261672 calls
+at stop 94031 at both sequence 1 and sequence 4. Keying on `stop_id` would merge
+two genuinely different arrivals into one row, and Phase 4 would then compare a
+prediction against the wrong arrival, silently.
+
+Ordered alignment resolves that, because the feed lists a trip's remaining stops in
+order. Verified on live data: trip 19585343 resolved stop 91039 to sequences 1 and
+53, and trip 19591500 resolved stop 98088 to 47 and 51. Every one of 8,243 stored
+predictions matched the schedule exactly on `(trip_id, stop_sequence, stop_id)`,
+with zero mismatches.
+
+**Rejected.** A plain `stop_id` to `stop_sequence` lookup, which is simpler but
+ambiguous for those 7.2% of trips. Re-keying `predictions` on `stop_id`, which
+needs no schedule at ingest but collapses repeated visits and corrupts the Phase 4
+comparison for the affected trips. Inferring the sequence from the position within
+the feed's list, which is wrong the moment a trip is under way, because the feed
+only carries remaining stops.
+
+**Consequences.** Prediction ingest now depends on a loaded schedule, so Phase 2 is
+a prerequisite for collecting anything from the trip updates feed. When no schedule
+covers the service day, rows are dropped as `no_schedule_loaded` rather than
+silently, because that is an operator problem.
+
+A per trip lookup is cached in memory. The real feed repeats the same 450 or so
+trips every 30 seconds, so without the cache this would be 450 queries per poll for
+data that does not change within a service day. Measured at one lookup per trip per
+poll cycle, served from cache thereafter.
+
+The active `feed_version` is resolved once per process. A schedule loaded by the
+weekly agent is therefore not picked up until the collector restarts. That is
+accepted: schedules change monthly at most, and re-querying every poll to catch a
+monthly event is the wrong trade.
+
+**At scale.** 93.8% of live predictions resolve. Of the 6.2% that do not, 487 of
+500 are stops the realtime feed reports which the static schedule does not list for
+that trip at all, and only 13 are ordering failures. That residue is a disagreement
+between MTS's own realtime and static data, not something this alignment can fix,
+and those stops will simply have no baseline in Phase 4. It is worth re-measuring
+after each schedule reload, since a fresher schedule may agree more closely.
+
+The alignment also assumes the feed's stop list is a subsequence of the scheduled
+list. A genuinely re-routed trip breaks that assumption, and the 13 out of order
+cases are most likely exactly that.

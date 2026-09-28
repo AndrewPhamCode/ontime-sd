@@ -38,6 +38,7 @@ from ontime_sd.feeds import (
 )
 from ontime_sd.logging_setup import configure_logging
 from ontime_sd.sinks import PredictionCache, write_positions, write_predictions
+from ontime_sd.trip_stops import StopSequenceResolver, resolve_predictions
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +137,10 @@ class FeedPoller:
             if feed == TRIP_UPDATES
             else None
         )
+        # The real feed omits stop_sequence, so it is recovered from the static
+        # schedule before writing. See ADR-0033.
+        self.resolver = StopSequenceResolver() if feed == TRIP_UPDATES else None
+        self.unresolved: dict[str, int] = {}
         self._last_prune: date | None = None
 
     # --- one poll ---
@@ -224,8 +229,10 @@ class FeedPoller:
                 "rows_written": rows_written,
                 "dropped": parsed.dropped,
                 "drop_reasons": list(parsed.drop_reasons),
+                "unresolved": self.unresolved or None,
                 "duration_ms": elapsed_ms(),
                 "cache_size": len(self.cache) if self.cache else None,
+                "trip_cache": len(self.resolver) if self.resolver else None,
             },
         )
         return poll_log.PollOutcome(
@@ -245,8 +252,17 @@ class FeedPoller:
                 return await write_positions(conn, parsed.positions)
 
         assert self.cache is not None
-        changed = self.cache.select_changed(parsed.predictions)
+        assert self.resolver is not None
+
         async with self.pool.acquire() as conn:
+            # Resolution first: an unresolved row has no usable cache key, and
+            # caching it before the sequence is known would key it wrongly.
+            resolved, unresolved = await resolve_predictions(
+                conn, self.resolver, parsed.predictions
+            )
+            self.unresolved = unresolved
+
+            changed = self.cache.select_changed(resolved)
             written = await write_predictions(conn, changed)
 
         # Remembered only after the write succeeded. Remembering a row that

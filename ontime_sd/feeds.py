@@ -60,7 +60,10 @@ class VehiclePositionRow:
 class PredictionRow:
     start_date: date
     trip_id: str
-    stop_sequence: int
+    # None until resolved. The real MTS feed identifies a stop by stop_id only,
+    # so the sequence is recovered from the schedule before writing. See
+    # ontime_sd/trip_stops.py and ADR-0033.
+    stop_sequence: int | None
     observed_at: datetime
     stop_id: str | None
     route_id: str | None
@@ -69,10 +72,19 @@ class PredictionRow:
     delay_seconds: int | None
     schedule_relationship: int | None
     vehicle_id: str | None
+    # Position of this stop within the trip's stop_time_update list, which is the
+    # ordering the alignment in trip_stops.py depends on.
+    feed_order: int = 0
 
     @property
     def cache_key(self) -> tuple[date, str, int]:
+        if self.stop_sequence is None:
+            raise ValueError("cache_key requires a resolved stop_sequence")
         return (self.start_date, self.trip_id, self.stop_sequence)
+
+    @property
+    def resolved(self) -> bool:
+        return self.stop_sequence is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,14 +264,15 @@ def extract_predictions(message: gtfs_rt.FeedMessage) -> ParsedFeed:
             reasons.add("no_start_date")
             continue
 
-        for stop_time in update.stop_time_update:
-            # stop_sequence is part of the primary key. A feed is allowed to
-            # identify a stop by stop_id alone, and resolving that to a sequence
-            # needs the static schedule, which is Phase 2. Until then such rows
-            # are dropped and counted rather than written under a guessed key.
-            if not stop_time.HasField("stop_sequence"):
+        for feed_order, stop_time in enumerate(update.stop_time_update):
+            # stop_sequence is optional in GTFS-Realtime and the real MTS feed
+            # never sends it. Rows are emitted unresolved and the sequence is
+            # recovered from the static schedule before writing, which is why a
+            # stop_id is required here instead. See ADR-0033.
+            stop_sequence = stop_time.stop_sequence if stop_time.HasField("stop_sequence") else None
+            if stop_sequence is None and not stop_time.stop_id:
                 dropped += 1
-                reasons.add("no_stop_sequence")
+                reasons.add("no_stop_identity")
                 continue
 
             arrival = stop_time.arrival
@@ -295,7 +308,7 @@ def extract_predictions(message: gtfs_rt.FeedMessage) -> ParsedFeed:
                 PredictionRow(
                     start_date=start_date,
                     trip_id=trip_id,
-                    stop_sequence=stop_time.stop_sequence,
+                    stop_sequence=stop_sequence,
                     observed_at=observed_at,
                     stop_id=stop_time.stop_id or None,
                     route_id=update.trip.route_id or None,
@@ -308,6 +321,7 @@ def extract_predictions(message: gtfs_rt.FeedMessage) -> ParsedFeed:
                         else None
                     ),
                     vehicle_id=update.vehicle.id or None,
+                    feed_order=feed_order,
                 )
             )
 
