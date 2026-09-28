@@ -62,6 +62,13 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+# httpx and httpcore log every request at INFO, including the full URL. The feed
+# URL carries the MTS API key as a query parameter, so at INFO those libraries
+# would write the key in plaintext to the collector log on disk, on every poll,
+# forever. Our own poll lines log the redacted URL instead.
+_SILENCED_LOGGERS = ("httpx", "httpcore")
+
+
 def configure_logging(level: str = "INFO") -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
@@ -70,3 +77,6 @@ def configure_logging(level: str = "INFO") -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level)
+
+    for name in _SILENCED_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)

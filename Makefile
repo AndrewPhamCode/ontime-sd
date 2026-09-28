@@ -43,4 +43,20 @@ psql: ## Open a psql shell on the compose database
 health: ## Hit the collector health endpoint
 	@curl -sS -i localhost:$${HEALTH_PORT:-8080}/healthz
 
-.PHONY: help install up down nuke migrate mock run test lint fmt psql health
+service-install: ## Install and start the launchd agent for 24/7 collection
+	bash scripts/install-service.sh
+
+service-uninstall: ## Stop and remove the launchd agent
+	bash scripts/uninstall-service.sh
+
+service-status: ## Show whether the launchd agent is running
+	launchctl list | grep sd.ontime.collector || echo "not loaded"
+
+service-logs: ## Follow the collector log
+	tail -f "$$HOME/Library/Logs/ontime-sd/collector.log"
+
+coverage: ## Show collection coverage and feed health from poll_log
+	docker compose exec -T postgres psql -U ontime -d ontime_sd -f /dev/stdin < scripts/coverage.sql
+
+.PHONY: help install up down nuke migrate mock run test lint fmt psql health \
+	service-install service-uninstall service-status service-logs coverage

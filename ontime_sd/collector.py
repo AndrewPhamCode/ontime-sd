@@ -386,6 +386,13 @@ async def run(settings: Settings, stop: asyncio.Event | None = None) -> Collecto
     pool = await create_pool(settings)
     timeout = http_timeout(settings)
 
+    # Imported here rather than at module scope because health imports
+    # CollectorState from this module.
+    from ontime_sd.health import HealthServer
+
+    health_server = HealthServer(state, settings)
+    health_port = await health_server.start()
+
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             pollers = [
@@ -399,6 +406,7 @@ async def run(settings: Settings, stop: asyncio.Event | None = None) -> Collecto
                     "poll_interval_seconds": settings.poll_interval_seconds,
                     "using_mock_feed": settings.using_mock_feed,
                     "feed_base_url": settings.mts_feed_base_url,
+                    "health_port": health_port,
                 },
             )
 
@@ -412,6 +420,7 @@ async def run(settings: Settings, stop: asyncio.Event | None = None) -> Collecto
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
     finally:
+        await health_server.stop()
         await pool.close()
         log.info(
             "collector stopped",

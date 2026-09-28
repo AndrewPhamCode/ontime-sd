@@ -60,7 +60,8 @@ def make_settings(**overrides: object) -> Settings:
         "prediction_change_threshold_seconds": 30,
         "backoff_base_seconds": 1.0,
         "backoff_max_seconds": 300.0,
-        "health_port": 8080,
+        # Ephemeral, so concurrent or repeated test runs cannot collide.
+        "health_port": 0,
         "health_stale_after_seconds": 300,
         "log_level": "INFO",
         "mock_port": 0,
