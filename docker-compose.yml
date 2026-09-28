@@ -1,0 +1,24 @@
+# Local Postgres for development. CI uses an equivalent service container
+# instead of this file, so the schema and tests exercise the same engine.
+services:
+  postgres:
+    image: postgres:16
+    container_name: ontime-sd-postgres
+    environment:
+      POSTGRES_USER: ontime
+      POSTGRES_PASSWORD: ontime
+      POSTGRES_DB: ontime_sd
+    ports:
+      # 5433 on the host because Homebrew postgresql@16 already owns 5432.
+      - "5433:5432"
+    volumes:
+      - ontime_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ontime -d ontime_sd"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  ontime_pgdata:

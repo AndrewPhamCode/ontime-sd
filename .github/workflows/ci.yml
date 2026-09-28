@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # A real Postgres, not mocks. The schema is COPY and conflict heavy, so
+    # anything less would not exercise the code paths that matter.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ontime
+          POSTGRES_PASSWORD: ontime
+          POSTGRES_DB: ontime_sd
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U ontime -d ontime_sd"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://ontime:ontime@localhost:5433/ontime_sd
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --all-groups
+
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Test
+        run: uv run pytest -q
