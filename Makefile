@@ -43,20 +43,30 @@ psql: ## Open a psql shell on the compose database
 health: ## Hit the collector health endpoint
 	@curl -sS -i localhost:$${HEALTH_PORT:-8080}/healthz
 
-service-install: ## Install and start the launchd agent for 24/7 collection
+load-gtfs: ## Download and load the static GTFS schedule (skips if unchanged)
+	uv run ontime-load-gtfs
+
+load-gtfs-force: ## Reload the schedule even if unchanged or already loaded
+	uv run ontime-load-gtfs --force
+
+schedule: ## Show loaded GTFS feed versions and recent load attempts
+	docker compose exec -T postgres psql -U ontime -d ontime_sd -f /dev/stdin < scripts/schedule.sql
+
+service-install: ## Install and start both launchd agents (collector and weekly loader)
 	bash scripts/install-service.sh
 
-service-uninstall: ## Stop and remove the launchd agent
+service-uninstall: ## Stop and remove both launchd agents
 	bash scripts/uninstall-service.sh
 
-service-status: ## Show whether the launchd agent is running
-	launchctl list | grep sd.ontime.collector || echo "not loaded"
+service-status: ## Show whether the launchd agents are running
+	@launchctl list | grep sd.ontime || echo "not loaded"
 
-service-logs: ## Follow the collector log
+service-logs: ## Follow the collector log (gtfs.log for the loader)
 	tail -f "$$HOME/Library/Logs/ontime-sd/collector.log"
 
 coverage: ## Show collection coverage and feed health from poll_log
 	docker compose exec -T postgres psql -U ontime -d ontime_sd -f /dev/stdin < scripts/coverage.sql
 
 .PHONY: help install up down nuke migrate mock run test lint fmt psql health \
-	service-install service-uninstall service-status service-logs coverage
+	service-install service-uninstall service-status service-logs coverage \
+	load-gtfs load-gtfs-force schedule

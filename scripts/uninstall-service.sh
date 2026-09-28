@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Stop and remove the launchd agent. Collected data is untouched.
+# Stop and remove both launchd agents. Collected data is untouched.
 set -euo pipefail
 
-LABEL="sd.ontime.collector"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-
-launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || echo "not loaded"
-rm -f "$PLIST"
-echo "removed $LABEL (collected data left in place)"
+for label in sd.ontime.collector sd.ontime.gtfs; do
+  launchctl bootout "gui/$UID/$label" 2>/dev/null || echo "$label not loaded"
+  rm -f "$HOME/Library/LaunchAgents/$label.plist"
+  echo "removed $label"
+done
+echo "collected data left in place"

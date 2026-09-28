@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>sd.ontime.gtfs</string>
+
+  <!-- Separate from the collector on purpose. The collector must never stop,
+       and this job downloads 8 MB and holds a long transaction. See ADR-0031. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__UV__</string>
+    <string>run</string>
+    <string>--project</string>
+    <string>__PROJECT_DIR__</string>
+    <string>ontime-load-gtfs</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT_DIR__</string>
+
+  <!-- Sundays at 03:30. MTS republishes roughly monthly, so weekly is ample and
+       a missed run costs nothing: the loader is idempotent and skips when the
+       feed is unchanged. launchd fires a missed calendar interval once the
+       machine wakes, which matters on a laptop. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>0</integer>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+
+  <!-- Deliberately not KeepAlive. This is a job that finishes, unlike the
+       collector, and restarting it on exit would loop forever. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/gtfs.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/gtfs.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__PATH__</string>
+  </dict>
+</dict>
+</plist>
