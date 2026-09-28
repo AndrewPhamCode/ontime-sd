@@ -14,19 +14,29 @@ group by feed, status
 order by feed, polls desc;
 
 \echo ''
-\echo '== gaps over 2 minutes between consecutive polls, last 24h =='
--- A gap means the collector was not running: the Mac slept, lost network, or
--- the process was down. Gaps are expected on a laptop and are recorded rather
--- than hidden, per ADR-0015.
-select feed, previous_poll, started_at, round(gap_seconds) as gap_seconds
+\echo '== gaps over 2 minutes between SUCCESSFUL polls, last 24h =='
+-- Measured between successes, not between attempts. Backoff keeps retrying every
+-- few seconds during an outage, so a gap between attempts stays small while
+-- collection is actually stopped. An earlier version of this query measured
+-- attempts and reported zero gaps through a real 90 second outage.
+--
+-- A gap means no data was collected in that window: the Mac slept, lost network,
+-- the feed was down, or the process was not running. Gaps are expected on a
+-- laptop and are recorded rather than hidden, per ADR-0015.
+select feed,
+       previous_success,
+       started_at as recovered_at,
+       round(gap_seconds) as gap_seconds
 from (
     select feed,
-           lag(started_at) over (partition by feed order by started_at) as previous_poll,
+           lag(started_at) over (partition by feed order by started_at) as previous_success,
            started_at,
            extract(epoch from started_at
                    - lag(started_at) over (partition by feed order by started_at)) as gap_seconds
     from poll_log
-    where started_at > now() - interval '24 hours'
+    -- A skip is a success: the feed had nothing new, and we were still polling.
+    where status in ('ok', 'skipped_unchanged')
+      and started_at > now() - interval '24 hours'
 ) gaps
 where gap_seconds > 120
 order by gap_seconds desc
