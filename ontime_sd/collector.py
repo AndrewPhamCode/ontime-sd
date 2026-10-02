@@ -38,7 +38,11 @@ from ontime_sd.feeds import (
 )
 from ontime_sd.logging_setup import configure_logging
 from ontime_sd.sinks import PredictionCache, write_positions, write_predictions
-from ontime_sd.trip_stops import StopSequenceResolver, resolve_predictions
+from ontime_sd.trip_stops import (
+    StopSequenceResolver,
+    apply_service_days,
+    resolve_predictions,
+)
 
 log = logging.getLogger(__name__)
 
@@ -137,10 +141,12 @@ class FeedPoller:
             if feed == TRIP_UPDATES
             else None
         )
-        # The real feed omits stop_sequence, so it is recovered from the static
-        # schedule before writing. See ADR-0033.
-        self.resolver = StopSequenceResolver() if feed == TRIP_UPDATES else None
+        # The real feed omits both stop_sequence and start_date, so both are
+        # recovered from the static schedule before writing. See ADR-0033 and
+        # ADR-0035.
+        self.resolver = StopSequenceResolver()
         self.unresolved: dict[str, int] = {}
+        self.service_days_corrected = 0
         self._last_prune: date | None = None
 
     # --- one poll ---
@@ -230,6 +236,7 @@ class FeedPoller:
                 "dropped": parsed.dropped,
                 "drop_reasons": list(parsed.drop_reasons),
                 "unresolved": self.unresolved or None,
+                "service_days_corrected": self.service_days_corrected or None,
                 "duration_ms": elapsed_ms(),
                 "cache_size": len(self.cache) if self.cache else None,
                 "trip_cache": len(self.resolver) if self.resolver else None,
@@ -249,7 +256,14 @@ class FeedPoller:
     async def _write(self, parsed: ParsedFeed) -> int:
         if self.feed == VEHICLE_POSITIONS:
             async with self.pool.acquire() as conn:
-                return await write_positions(conn, parsed.positions)
+                # start_date is inferred from the clock at parse time, which is
+                # wrong for a trip that crosses midnight. Correct it against the
+                # schedule before writing. See ADR-0035.
+                positions, corrected = await apply_service_days(
+                    conn, self.resolver, parsed.positions
+                )
+                self.service_days_corrected = corrected
+                return await write_positions(conn, positions)
 
         assert self.cache is not None
         assert self.resolver is not None

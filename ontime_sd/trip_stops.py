@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, datetime, time, timedelta
 
 import asyncpg
 
-from ontime_sd.feeds import PredictionRow
+from ontime_sd.config import SERVICE_TZ
+from ontime_sd.feeds import PredictionRow, VehiclePositionRow
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +99,7 @@ class StopSequenceResolver:
     def __init__(self, max_cached_trips: int = MAX_CACHED_TRIPS) -> None:
         self.max_cached_trips = max_cached_trips
         self._trips: dict[tuple[str, str], list[tuple[int, str]]] = {}
+        self._windows: dict[tuple[str, str], tuple[int, int] | None] = {}
         self._feed_version: str | None = None
         self.hits = 0
         self.misses = 0
@@ -107,7 +109,26 @@ class StopSequenceResolver:
 
     def clear(self) -> None:
         self._trips.clear()
+        self._windows.clear()
         self._feed_version = None
+
+    async def scheduled_window(
+        self, conn: asyncpg.Connection, feed_version: str, trip_id: str
+    ) -> tuple[int, int] | None:
+        """The trip's first and last scheduled times, in service day seconds."""
+        key = (feed_version, trip_id)
+        if key in self._windows:
+            return self._windows[key]
+
+        row = await conn.fetchrow(_TRIP_WINDOW_SQL, feed_version, trip_id)
+        window: tuple[int, int] | None = None
+        if row is not None and row["first_seconds"] is not None:
+            window = (row["first_seconds"], row["last_seconds"])
+
+        if len(self._windows) >= self.max_cached_trips:
+            self._windows.clear()
+        self._windows[key] = window
+        return window
 
     async def current_feed_version(self, conn: asyncpg.Connection, service_day: date) -> str | None:
         """The loaded schedule covering this day, most recent first.
@@ -187,8 +208,17 @@ async def resolve_predictions(
         drop("no_schedule_loaded", len(needs_lookup))
         return resolved, dropped
 
-    by_trip: dict[tuple[date, str], list[PredictionRow]] = {}
+    # Service day first: it is part of the grouping key and of the primary key,
+    # so grouping before correcting it would split one run across two days.
+    from dataclasses import replace as _replace
+
+    settled: list[PredictionRow] = []
     for row in needs_lookup:
+        day = await service_day_for(conn, resolver, row.trip_id, row.observed_at, row.start_date)
+        settled.append(row if day == row.start_date else _replace(row, start_date=day))
+
+    by_trip: dict[tuple[date, str], list[PredictionRow]] = {}
+    for row in settled:
         by_trip.setdefault((row.start_date, row.trip_id), []).append(row)
 
     for (_, trip_id), trip_rows in by_trip.items():
@@ -209,3 +239,114 @@ async def resolve_predictions(
             resolved.append(replace(row, stop_sequence=sequence))
 
     return resolved, dropped
+
+
+# --- service day resolution ---------------------------------------------------
+
+_TRIP_WINDOW_SQL = """
+select min(arrival_seconds) as first_seconds, max(arrival_seconds) as last_seconds
+from stop_times
+where feed_version = $1 and trip_id = $2 and arrival_seconds is not null
+"""
+
+# A trip may run late more readily than early, so the window is asymmetric.
+GRACE_BEFORE_SECONDS = 900
+GRACE_AFTER_SECONDS = 3600
+
+
+def seconds_into_service_day(observed_at: datetime, service_day: date) -> float:
+    """How far into a given service day an instant falls, in local terms.
+
+    GTFS service day times are counted from midnight of the service day and may
+    exceed 86400, which is exactly what makes a trip scheduled 23:35 to 24:01
+    belong to the previous day when observed at 00:05.
+    """
+    local = observed_at.astimezone(SERVICE_TZ)
+    midnight = datetime.combine(service_day, time(0, 0), tzinfo=SERVICE_TZ)
+    return (local - midnight).total_seconds()
+
+
+def resolve_service_day(
+    observed_at: datetime,
+    scheduled_window: tuple[int, int] | None,
+    *,
+    grace_before: int = GRACE_BEFORE_SECONDS,
+    grace_after: int = GRACE_AFTER_SECONDS,
+) -> date:
+    """Which service day an observation of a trip belongs to.
+
+    The real MTS feed omits `start_date` on every entity, so it has to be derived.
+    Using the observation date alone is wrong for any trip that crosses midnight:
+    measured on real data, 199 trip records filed the tail of one night's run
+    together with the start of the next, producing a single "trip" spanning 23.8
+    hours. See ADR-0035.
+
+    Today is preferred when both candidates fit, and used as the fallback when the
+    trip has no schedule to compare against.
+
+    >>> from datetime import UTC
+    >>> # 00:05 local, trip scheduled 23:35 to 24:01, so it began yesterday.
+    >>> resolve_service_day(datetime(2026, 9, 29, 7, 5, tzinfo=UTC), (84900, 86460))
+    datetime.date(2026, 9, 28)
+    """
+    today = observed_at.astimezone(SERVICE_TZ).date()
+    if scheduled_window is None:
+        return today
+
+    first, last = scheduled_window
+    for candidate in (today, today - timedelta(days=1)):
+        offset = seconds_into_service_day(observed_at, candidate)
+        if first - grace_before <= offset <= last + grace_after:
+            return candidate
+    return today
+
+
+async def service_day_for(
+    conn: asyncpg.Connection,
+    resolver: StopSequenceResolver,
+    trip_id: str,
+    observed_at: datetime,
+    service_day_hint: date | None = None,
+) -> date:
+    """Resolve an observation's service day, consulting the schedule.
+
+    Falls back to the local date when no schedule is loaded or the trip is unknown,
+    which is the same answer the old clock based inference gave.
+    """
+    hint = service_day_hint or observed_at.astimezone(SERVICE_TZ).date()
+    feed_version = await resolver.current_feed_version(conn, hint)
+    if feed_version is None:
+        return hint
+
+    window = await resolver.scheduled_window(conn, feed_version, trip_id)
+    return resolve_service_day(observed_at, window)
+
+
+async def apply_service_days(
+    conn: asyncpg.Connection,
+    resolver: StopSequenceResolver,
+    rows: Sequence[VehiclePositionRow],
+) -> tuple[list[VehiclePositionRow], int]:
+    """Correct start_date on position rows, returning the rows and how many moved.
+
+    Rows with no trip_id keep whatever they had: without a trip there is no
+    schedule to compare against, and such a vehicle is not on a run anyway.
+    """
+    from dataclasses import replace
+
+    corrected: list[VehiclePositionRow] = []
+    moved = 0
+
+    for row in rows:
+        if not row.trip_id:
+            corrected.append(row)
+            continue
+
+        resolved = await service_day_for(conn, resolver, row.trip_id, row.ts, row.start_date)
+        if resolved != row.start_date:
+            moved += 1
+            corrected.append(replace(row, start_date=resolved))
+        else:
+            corrected.append(row)
+
+    return corrected, moved
