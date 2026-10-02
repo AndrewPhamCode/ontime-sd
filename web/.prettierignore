@@ -1,0 +1,4 @@
+# Generated from the API's OpenAPI document by `npm run gen:types`.
+# Formatting it would create a diff on every regeneration.
+src/api/schema.d.ts
+dist

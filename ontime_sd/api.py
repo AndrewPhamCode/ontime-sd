@@ -19,7 +19,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import asyncpg
@@ -170,10 +170,51 @@ class StopDetail(BaseModel):
 class Vehicle(BaseModel):
     vehicle_id: str
     route_id: str | None
+    route_short_name: str | None
+    # GTFS route_type: 0 is a trolley, 3 is a bus. Drawn differently.
+    route_type: int | None
     trip_id: str | None
     lat: float
     lon: float
     ts: datetime
+
+
+class UpcomingArrival(BaseModel):
+    """One service due at a stop, with MTS's estimate and our corrected one."""
+
+    trip_id: str
+    route_id: str | None
+    route_short_name: str | None
+    route_type: int | None
+    headsign: str | None
+    stop_sequence: int
+
+    mts_arrival: datetime
+    predicted_at: datetime
+
+    corrected_arrival: datetime | None
+    correction_seconds: float | None
+    # Which level of the fallback chain produced the correction, and how many
+    # observations back it. Shown to the rider so a thin estimate is identifiable.
+    correction_basis: str
+    correction_sample: int | None
+
+
+class StopUpcoming(BaseModel):
+    stop_id: str
+    stop_name: str | None
+    lat: float | None
+    lon: float | None
+    arrivals: list[UpcomingArrival]
+    as_of: datetime
+
+
+class StopSearchResult(BaseModel):
+    stop_id: str
+    stop_name: str | None
+    lat: float
+    lon: float
+    arrivals: int
 
 
 class ShapePoint(BaseModel):
@@ -184,6 +225,54 @@ class ShapePoint(BaseModel):
 class RouteShape(BaseModel):
     route_id: str
     points: list[ShapePoint]
+
+
+# --- the ETA correction ------------------------------------------------------
+#
+# MTS's live prediction is adjusted by the bias we measured for that stop and
+# route in Phase 4: corrected = predicted - mean(predicted - actual). MTS runs
+# optimistic, so the bias is usually negative and subtracting it pushes the
+# estimate later, which is the direction a rider needs.
+#
+# This is a bias correction derived from batch statistics, NOT live model
+# inference. Phase 5's model is at parity on mean absolute error, and the app says
+# so rather than implying a live model.
+
+# The horizon the bias is measured at. Ten minutes is the middle of the range and
+# the lead time a rider actually plans around.
+BIAS_HORIZON_MINUTES = 10
+
+# A correction needs enough observations to be worth more than nothing. Below
+# these, fall back a level rather than correcting on noise.
+MIN_STOP_ROUTE_SAMPLE = 10
+MIN_ROUTE_SAMPLE = 30
+
+BASIS_STOP_ROUTE = "stop_and_route"
+BASIS_ROUTE = "route"
+BASIS_NONE = "none"
+
+
+def choose_bias(
+    stop_route_n: int | None,
+    stop_route_bias: float | None,
+    route_n: int | None,
+    route_bias: float | None,
+) -> tuple[float | None, str, int | None]:
+    """Pick the most specific bias with enough evidence behind it.
+
+    Returns the bias in seconds, which level produced it, and the sample size.
+    When nothing qualifies the answer is None, and the caller shows MTS unchanged
+    rather than inventing a correction.
+    """
+    if (
+        stop_route_bias is not None
+        and stop_route_n is not None
+        and stop_route_n >= MIN_STOP_ROUTE_SAMPLE
+    ):
+        return stop_route_bias, BASIS_STOP_ROUTE, stop_route_n
+    if route_bias is not None and route_n is not None and route_n >= MIN_ROUTE_SAMPLE:
+        return route_bias, BASIS_ROUTE, route_n
+    return None, BASIS_NONE, None
 
 
 # --- app ---------------------------------------------------------------------
@@ -221,6 +310,41 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
         return state["pool"]
 
     cache: _TtlCache = state["cache"]
+
+    async def _load_bias() -> dict[str, dict]:
+        """Measured bias per stop-and-route and per route, in seconds.
+
+        One aggregate rather than a query per arrival. Only changes when the
+        pipeline runs, so it sits behind the same TTL cache as everything else.
+        """
+        pair_rows = await db().fetch(
+            """
+            select stop_id, route_id, count(*) as n, avg(error_seconds)::float8 as bias
+            from prediction_errors
+            where source = 'mts' and horizon_minutes = $1 and ping_gap_seconds <= $2
+              and route_id is not null
+            group by stop_id, route_id
+            """,
+            BIAS_HORIZON_MINUTES,
+            TIGHT_LABEL_SECONDS,
+        )
+        route_rows = await db().fetch(
+            """
+            select route_id, count(*) as n, avg(error_seconds)::float8 as bias
+            from prediction_errors
+            where source = 'mts' and horizon_minutes = $1 and ping_gap_seconds <= $2
+              and route_id is not null
+            group by route_id
+            """,
+            BIAS_HORIZON_MINUTES,
+            TIGHT_LABEL_SECONDS,
+        )
+        return {
+            "stop_route": {
+                (row["stop_id"], row["route_id"]): (row["n"], row["bias"]) for row in pair_rows
+            },
+            "route": {row["route_id"]: (row["n"], row["bias"]) for row in route_rows},
+        }
 
     async def resolve_window() -> Window:
         """The window every comparison uses.
@@ -494,6 +618,37 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
 
         return await cache.get(f"stops:{limit}", produce)
 
+    # Declared before /api/stops/{stop_id}: FastAPI matches routes in order, so a
+    # literal segment placed after the parameterised one is never reached and
+    # "search" would be treated as a stop id.
+    @app.get("/api/stops/search", response_model=list[StopSearchResult])
+    async def stop_search(
+        q: str = Query(..., min_length=2, description="Part of a stop name"),
+        limit: int = Query(12, le=50),
+    ) -> list[StopSearchResult]:
+        """Find a stop by name. Busiest matches first, since those are the ones
+        someone is most likely looking for."""
+        rows = await db().fetch(
+            """
+            select a.stop_id,
+                   max(s.stop_name)        as stop_name,
+                   max(s.stop_lat)::float8 as lat,
+                   max(s.stop_lon)::float8 as lon,
+                   count(*)                as arrivals
+            from arrivals a
+            join stops s
+              on s.feed_version = a.feed_version and s.stop_id = a.stop_id
+            where s.stop_name ilike '%' || $1 || '%'
+              and s.stop_lat is not null and s.stop_lon is not null
+            group by a.stop_id
+            order by count(*) desc
+            limit $2
+            """,
+            q,
+            limit,
+        )
+        return [StopSearchResult(**dict(row)) for row in rows]
+
     @app.get("/api/stops/{stop_id}", response_model=StopDetail)
     async def stop_detail(
         stop_id: str,
@@ -555,19 +710,119 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
             )
         return StopDetail(stop_id=stop_id, stop_name=name, recent=recent)
 
+    @app.get("/api/stops/{stop_id}/upcoming", response_model=StopUpcoming)
+    async def stop_upcoming(
+        stop_id: str,
+        limit: int = Query(8, le=30, description="How many services to return"),
+    ) -> StopUpcoming:
+        """Live arrivals at a stop, with MTS's estimate and our corrected one.
+
+        The correction is the bias measured for this stop and route in Phase 4.
+        It is a statistical correction, not live model inference, and the response
+        carries the basis and sample size so the client can say which.
+        """
+        bias = await cache.get("bias", _load_bias)
+        stop_bias: dict[tuple[str, str], tuple[int, float]] = bias["stop_route"]
+        route_bias: dict[str, tuple[int, float]] = bias["route"]
+
+        info = await db().fetchrow(
+            "select max(stop_name) as stop_name, max(stop_lat)::float8 as lat, "
+            "max(stop_lon)::float8 as lon from stops where stop_id = $1",
+            stop_id,
+        )
+
+        rows = await db().fetch(
+            """
+            select distinct on (p.trip_id, p.stop_sequence)
+                   p.trip_id, p.stop_sequence, p.route_id,
+                   p.arrival_time, p.observed_at,
+                   r.route_short_name, r.route_type, t.trip_headsign
+            from predictions p
+            left join (
+                select distinct on (trip_id) trip_id, trip_headsign, route_id
+                from trips order by trip_id, feed_version
+            ) t on t.trip_id = p.trip_id
+            left join (
+                select distinct on (route_id) route_id, route_short_name, route_type
+                from routes order by route_id, feed_version
+            ) r on r.route_id = coalesce(p.route_id, t.route_id)
+            where p.stop_id = $1
+              and p.arrival_time is not null
+              and p.arrival_time > now()
+            order by p.trip_id, p.stop_sequence, p.observed_at desc
+            """,
+            stop_id,
+        )
+
+        arrivals: list[UpcomingArrival] = []
+        for row in rows:
+            route_id = row["route_id"]
+            pair = stop_bias.get((stop_id, route_id)) if route_id else None
+            single = route_bias.get(route_id) if route_id else None
+
+            chosen, basis, sample = choose_bias(
+                pair[0] if pair else None,
+                pair[1] if pair else None,
+                single[0] if single else None,
+                single[1] if single else None,
+            )
+
+            corrected = (
+                row["arrival_time"] - timedelta(seconds=chosen) if chosen is not None else None
+            )
+            arrivals.append(
+                UpcomingArrival(
+                    trip_id=row["trip_id"],
+                    route_id=route_id,
+                    route_short_name=row["route_short_name"],
+                    route_type=row["route_type"],
+                    headsign=row["trip_headsign"],
+                    stop_sequence=row["stop_sequence"],
+                    mts_arrival=row["arrival_time"],
+                    predicted_at=row["observed_at"],
+                    corrected_arrival=corrected,
+                    correction_seconds=-chosen if chosen is not None else None,
+                    correction_basis=basis,
+                    correction_sample=sample,
+                )
+            )
+
+        arrivals.sort(key=lambda a: a.mts_arrival)
+        return StopUpcoming(
+            stop_id=stop_id,
+            stop_name=info["stop_name"] if info else None,
+            lat=info["lat"] if info else None,
+            lon=info["lon"] if info else None,
+            arrivals=arrivals[:limit],
+            as_of=datetime.now(tz=UTC),
+        )
+
     @app.get("/api/vehicles", response_model=list[Vehicle])
     async def vehicles(
         max_age_minutes: int = Query(15, description="Ignore stale positions"),
     ) -> list[Vehicle]:
         rows = await db().fetch(
             """
-            select distinct on (vehicle_id)
-                   vehicle_id, route_id, trip_id,
-                   lat::float8 as lat, lon::float8 as lon, ts
-            from vehicle_positions
-            where ts > now() - ($1 * interval '1 minute')
-              and lat is not null and lon is not null
-            order by vehicle_id, ts desc
+            select v.vehicle_id, v.route_id, v.trip_id,
+                   v.lat::float8 as lat, v.lon::float8 as lon, v.ts,
+                   r.route_short_name,
+                   r.route_type
+            from (
+                select distinct on (vehicle_id)
+                       vehicle_id, route_id, trip_id, feed_version_hint, lat, lon, ts
+                from (
+                    select vehicle_id, route_id, trip_id, null::text as feed_version_hint,
+                           lat, lon, ts
+                    from vehicle_positions
+                    where ts > now() - ($1 * interval '1 minute')
+                      and lat is not null and lon is not null
+                ) recent
+                order by vehicle_id, ts desc
+            ) v
+            left join (
+                select distinct on (route_id) route_id, route_short_name, route_type
+                from routes order by route_id, feed_version
+            ) r on r.route_id = v.route_id
             """,
             max_age_minutes,
         )

@@ -320,3 +320,400 @@ select {
   background: var(--surface);
   color: var(--ink);
 }
+
+/* ---------------------------------------------------------------------------
+   App shell. The map is the product, so it owns the viewport and the page
+   scrolls only on the analysis tab.
+   --------------------------------------------------------------------------- */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--plane);
+}
+
+.appbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.brand-mark {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: var(--series-lgbm);
+  align-self: center;
+}
+
+.brand strong {
+  font-size: 16px;
+  letter-spacing: -0.01em;
+}
+
+.brand-sub {
+  color: var(--ink-muted);
+  font-size: 12.5px;
+}
+
+@media (max-width: 720px) {
+  .brand-sub {
+    display: none;
+  }
+}
+
+.appbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--plane);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px;
+}
+
+.tab {
+  border: none;
+  background: transparent;
+  color: var(--ink-secondary);
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 13px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.tab.active {
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.07);
+}
+
+.scroll-area {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* Map and the arrivals sheet beside it. */
+.app-stage {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  min-height: 0;
+}
+
+.map-stage {
+  position: relative;
+  min-height: 0;
+}
+
+.map-overlay {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.map-overlay > * {
+  pointer-events: auto;
+}
+
+.place-buttons {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.map-legend {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 2;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  flex-wrap: wrap;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  color: var(--ink-secondary);
+}
+
+.map-legend .dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: baseline;
+}
+
+.map-legend .dot.stop {
+  background: var(--series-lgbm);
+}
+.map-legend .dot.bus {
+  background: var(--status-good);
+}
+.map-legend .dot.trolley {
+  background: #4a3aa7;
+}
+.map-legend .muted {
+  color: var(--ink-muted);
+}
+
+/* Search */
+.search {
+  position: relative;
+  flex: 1 1 260px;
+  max-width: 340px;
+}
+
+.search input {
+  width: 100%;
+  font: inherit;
+  font-size: 14px;
+  padding: 9px 13px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.search-results {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 5px;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.search-results button {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  background: none;
+  border: none;
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  padding: 7px 9px;
+  border-radius: 7px;
+  cursor: pointer;
+  color: var(--ink);
+}
+
+.search-results button:hover {
+  background: var(--plane);
+}
+
+.search-results .muted {
+  color: var(--ink-muted);
+  font-size: 11.5px;
+}
+
+/* Arrivals sheet */
+.sheet {
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.sheet-body,
+.sheet-empty {
+  padding: 18px 18px 26px;
+}
+
+.sheet-empty {
+  color: var(--ink-secondary);
+  font-size: 14px;
+}
+
+.sheet-empty h2 {
+  font-size: 16px;
+  margin-bottom: 6px;
+  color: var(--ink);
+}
+
+.sheet-head h2 {
+  font-size: 18px;
+}
+
+.sheet-sub {
+  margin: 2px 0 0;
+  color: var(--ink-muted);
+  font-size: 12.5px;
+}
+
+.arrivals {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+}
+
+.arrivals li {
+  border-top: 1px solid var(--grid);
+  padding: 12px 0;
+}
+
+.arrival-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.route-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 6px;
+  background: var(--status-good);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.route-badge.trolley {
+  background: #4a3aa7;
+}
+
+.headsign {
+  flex: 1;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eta-main {
+  font-size: 17px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.arrival-detail {
+  display: flex;
+  gap: 14px;
+  margin-top: 5px;
+  font-size: 12.5px;
+  color: var(--ink-secondary);
+  flex-wrap: wrap;
+}
+
+.arrival-detail .clock {
+  color: var(--ink-muted);
+}
+
+.arrival-detail .ours {
+  color: var(--series-lgbm);
+  font-weight: 600;
+}
+
+.arrival-detail .ours.muted {
+  color: var(--ink-muted);
+  font-weight: 400;
+}
+
+.why {
+  margin-top: 7px;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink-muted);
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.sheet-foot {
+  margin-top: 20px;
+  padding-top: 14px;
+  border-top: 1px solid var(--grid);
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+/* Phone: the map keeps most of the screen and the sheet sits under it. */
+@media (max-width: 860px) {
+  .app-stage {
+    grid-template-columns: 1fr;
+    grid-template-rows: 58vh 1fr;
+  }
+
+  .sheet {
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+
+  .map-legend {
+    font-size: 11.5px;
+    gap: 10px;
+    padding: 5px 11px;
+  }
+}
+
+/* MapLibre popups should match the app rather than the library default. */
+.maplibregl-popup-content {
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12.5px;
+  padding: 8px 11px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+}
+
+.maplibregl-popup-tip {
+  display: none;
+}
