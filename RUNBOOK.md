@@ -70,13 +70,28 @@ passes no environment and the process reads `.env` from the project directory.
 Expected on a laptop. The Mac sleeping, losing network, or Docker not being up
 yet after login all produce gaps, and `make coverage` lists any over two minutes.
 
-This is a known, accepted limitation of running on a development machine, per
-ADR-0015. Gaps are recorded rather than hidden so that collection coverage stays
-measurable. To reduce them:
+The collector is wrapped in `caffeinate -si` by its launchd agent, so it holds a
+sleep assertion for its whole life. Verify with:
 
-- Keep Docker Desktop set to start at login.
-- Prevent sleep while collecting: `caffeinate -s` in a terminal, or System
-  Settings, or move the collector to an always on host.
+```
+pmset -g assertions | grep -E 'PreventSystemSleep|PreventUserIdleSystemSleep'
+```
+
+Both should read 1. If they do not, the agent is not running the wrapped command:
+reinstall with `make service-install`.
+
+Even with the assertion held, two things still cause gaps and neither can be
+fixed from user space:
+
+- **Closing the lid** sleeps the machine regardless.
+- **Running on battery** means only the `-i` assertion applies; `-s` is honoured
+  on AC power only.
+
+So for full coverage the machine stays open and plugged in. Measured cost of not
+doing this: coverage fell to 35%, losing about 15 hours of data per day. Also keep
+Docker Desktop set to start at login, or the collector cannot reach the database.
+
+Moving to an always on host is the real fix, per ADR-0015.
 
 Do not backfill a gap. There is no source to backfill from: realtime data not
 captured is gone.

@@ -451,11 +451,31 @@ database, so Docker Desktop must be set to start at login. If it is not, the
 collector starts, fails to connect, backs off, and recovers once Docker is
 running, which is the correct behavior but shows up as a startup gap.
 
-**At scale.** Gaps from sleep, network loss, and Docker not being ready are
-real and will bias any naive analysis of collection coverage. They are
-mitigated, not solved, by recording every poll outcome in `poll_log` so coverage
-is measurable rather than assumed. Moving to an always on host is the next
-operational step after the collector is verified.
+**Measured, and worse than expected.** Over the first three days of real
+collection, coverage was 64.4%, then 37.4%, then 35.3%, losing about 15 hours of
+irreplaceable data per day. The `pmset` log showed the cause: the machine was on
+battery and cycling through Maintenance Sleep. Recording coverage in `poll_log`
+is what made this visible at all, and it only became visible after the gap query
+was corrected to measure successful polls rather than attempts.
+
+**Mitigation.** The launchd agent now wraps the collector in `caffeinate -si`, so
+the process holds both `PreventUserIdleSystemSleep` and `PreventSystemSleep` for
+its entire life rather than depending on someone running `caffeinate` by hand.
+`-i` applies on battery; `-s` is honoured only on AC power. Display sleep is
+deliberately left alone, since the screen is irrelevant to collection.
+
+This is a mitigation and not a fix. Closing the lid still sleeps the machine and
+no user space assertion can override that, so the laptop must stay open and
+plugged in to achieve full coverage. An always on host remains the real answer,
+and these numbers are the argument for doing it before Phase 5 rather than after.
+
+**At scale.** Gaps bias any naive analysis of coverage, so a model trained on this
+data must account for which hours are actually represented. Reinstalling the
+agents is itself a risk: `launchctl bootout` returns before the job is unloaded,
+and bootstrapping into that window fails and leaves the collector down. The
+install script now waits for the old job to disappear, retries once, and verifies
+registration before reporting success, because a silent failure there stops
+collection entirely.
 
 ---
 

@@ -6,9 +6,24 @@
   <key>Label</key>
   <string>sd.ontime.collector</string>
 
-  <!-- launchd provides no PATH, so every path here is absolute. -->
+  <!-- launchd provides no PATH, so every path here is absolute.
+
+       Wrapped in caffeinate so the collector holds a sleep assertion for its
+       entire life, rather than depending on someone remembering to run
+       caffeinate by hand. Measured cost of not doing this: collection coverage
+       fell to 35%, losing about 15 hours of irreplaceable data per day. See
+       ADR-0015.
+
+         -i  prevent idle system sleep, which applies on battery too
+         -s  prevent system sleep, which the OS honours only on AC power
+
+       Display sleep is deliberately NOT prevented: the screen can turn off,
+       which saves power and is irrelevant to collection. Closing the lid still
+       sleeps the machine, which no user space assertion can override. -->
   <key>ProgramArguments</key>
   <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-si</string>
     <string>__UV__</string>
     <string>run</string>
     <string>--project</string>
