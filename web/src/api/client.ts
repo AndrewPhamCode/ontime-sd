@@ -41,20 +41,63 @@ async function get<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+/** Parameters that change what the API computes.
+ *
+ *  These mirror the settings exactly. They are always sent explicitly rather
+ *  than relying on the server defaults, so what is on screen is always a
+ *  function of what the panel says, and the API's own caching is keyed on the
+ *  same values.
+ */
+export interface Params {
+  horizon: number;
+  minSample: number;
+  labelFilter: number;
+  compare: string;
+}
+
+const query = (parts: Record<string, string | number>) =>
+  Object.entries(parts)
+    .map(([key, value]) => `${key}=${encodeURIComponent(String(value))}`)
+    .join('&');
+
 export const api = {
-  headline: () => get<Headline>('/api/headline'),
+  headline: (p: Params) =>
+    get<Headline>(`/api/headline?${query({ max_ping_gap: p.labelFilter })}`),
   window: () => get<Window>('/api/window'),
-  routes: (horizon: number) => get<RouteComparison[]>(`/api/routes?horizon=${horizon}`),
-  distribution: (horizon: number) =>
-    get<DistributionBucket[]>(`/api/error-distribution?horizon=${horizon}`),
-  dataQuality: () => get<DataQuality>('/api/data-quality'),
+  routes: (p: Params) =>
+    get<RouteComparison[]>(
+      `/api/routes?${query({
+        horizon: p.horizon,
+        max_ping_gap: p.labelFilter,
+        compare: p.compare,
+      })}`,
+    ),
+  distribution: (p: Params) =>
+    get<DistributionBucket[]>(
+      `/api/error-distribution?${query({
+        horizon: p.horizon,
+        max_ping_gap: p.labelFilter,
+      })}`,
+    ),
+  dataQuality: (p: Params) =>
+    get<DataQuality>(`/api/data-quality?${query({ max_ping_gap: p.labelFilter })}`),
   modelRun: () => get<ModelRun | null>('/api/model-run'),
   stops: () => get<Stop[]>('/api/stops?limit=1500'),
-  stopDetail: (stopId: string, horizon: number) =>
-    get<StopDetail>(`/api/stops/${encodeURIComponent(stopId)}?horizon=${horizon}`),
+  stopDetail: (stopId: string, p: Params) =>
+    get<StopDetail>(
+      `/api/stops/${encodeURIComponent(stopId)}?${query({
+        horizon: p.horizon,
+        compare: p.compare,
+      })}`,
+    ),
   vehicles: () => get<Vehicle[]>('/api/vehicles'),
-  upcoming: (stopId: string) =>
-    get<StopUpcoming>(`/api/stops/${encodeURIComponent(stopId)}/upcoming`),
-  searchStops: (query: string) =>
-    get<StopSearchResult[]>(`/api/stops/search?q=${encodeURIComponent(query)}`),
+  upcoming: (stopId: string, p: Params) =>
+    get<StopUpcoming>(
+      `/api/stops/${encodeURIComponent(stopId)}/upcoming?${query({
+        horizon: p.horizon,
+        min_sample: p.minSample,
+      })}`,
+    ),
+  searchStops: (query_: string) =>
+    get<StopSearchResult[]>(`/api/stops/search?q=${encodeURIComponent(query_)}`),
 };

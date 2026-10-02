@@ -1,22 +1,19 @@
 import { api, type StopDetail as StopDetailData } from '../api/client';
 import { SOURCE_COLORS, formatClock, formatSignedMinutes } from '../lib/format';
 import { useApi } from '../lib/useApi';
+import { useParams } from '../settings/useParams';
 import { Failed, Pending } from './Card';
 
 /** One stop, concretely: scheduled, what MTS said, what we said, what happened.
  *
  *  This is the panel that makes the aggregate believable. A visitor can see an
  *  individual case and check the arithmetic. */
-export function StopDetail({
-  stopId,
-  horizon,
-}: {
-  stopId: string | null;
-  horizon: number;
-}) {
+export function StopDetail({ stopId }: { stopId: string | null }) {
+  const params = useParams();
+  const horizon = params.horizon;
   const { data, error, loading } = useApi<StopDetailData | null>(
-    () => (stopId ? api.stopDetail(stopId, horizon) : Promise.resolve(null)),
-    [stopId, horizon],
+    () => (stopId ? api.stopDetail(stopId, params) : Promise.resolve(null)),
+    [stopId, params],
   );
 
   if (!stopId) {

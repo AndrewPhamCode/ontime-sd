@@ -16,6 +16,7 @@ import {
   toHorizonSeries,
   type Source,
 } from '../lib/format';
+import { useParams } from '../settings/useParams';
 import { useApi } from '../lib/useApi';
 import { Card, Empty, Failed, Pending } from './Card';
 
@@ -25,7 +26,11 @@ import { Card, Empty, Failed, Pending } from './Card';
  *  legend, so identity never rests on colour alone. Two of the four colours sit
  *  below 3:1 against the light surface, which obliges exactly this. */
 export function HorizonChart() {
-  const { data, error, loading } = useApi<HeadlineData>(() => api.headline());
+  const params = useParams();
+  const { data, error, loading } = useApi<HeadlineData>(
+    () => api.headline(params),
+    [params],
+  );
 
   if (loading)
     return (

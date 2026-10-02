@@ -257,6 +257,8 @@ def choose_bias(
     stop_route_bias: float | None,
     route_n: int | None,
     route_bias: float | None,
+    min_stop_route: int = MIN_STOP_ROUTE_SAMPLE,
+    min_route: int = MIN_ROUTE_SAMPLE,
 ) -> tuple[float | None, str, int | None]:
     """Pick the most specific bias with enough evidence behind it.
 
@@ -264,15 +266,24 @@ def choose_bias(
     When nothing qualifies the answer is None, and the caller shows MTS unchanged
     rather than inventing a correction.
     """
-    if (
-        stop_route_bias is not None
-        and stop_route_n is not None
-        and stop_route_n >= MIN_STOP_ROUTE_SAMPLE
-    ):
+    if stop_route_bias is not None and stop_route_n is not None and stop_route_n >= min_stop_route:
         return stop_route_bias, BASIS_STOP_ROUTE, stop_route_n
-    if route_bias is not None and route_n is not None and route_n >= MIN_ROUTE_SAMPLE:
+    if route_bias is not None and route_n is not None and route_n >= min_route:
         return route_bias, BASIS_ROUTE, route_n
     return None, BASIS_NONE, None
+
+
+def validate_source(source: str) -> str:
+    """Reject an unknown predictor loudly.
+
+    Returning an empty column instead would read on screen as "the model has no
+    data" rather than "you asked for something that does not exist".
+    """
+    if source not in SOURCES:
+        raise HTTPException(
+            422, f"unknown predictor {source!r}, expected one of {', '.join(SOURCES)}"
+        )
+    return source
 
 
 # --- app ---------------------------------------------------------------------
@@ -311,7 +322,7 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
 
     cache: _TtlCache = state["cache"]
 
-    async def _load_bias() -> dict[str, dict]:
+    async def _load_bias(horizon: int, max_ping_gap: int) -> dict[str, dict]:
         """Measured bias per stop-and-route and per route, in seconds.
 
         One aggregate rather than a query per arrival. Only changes when the
@@ -325,8 +336,8 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
               and route_id is not null
             group by stop_id, route_id
             """,
-            BIAS_HORIZON_MINUTES,
-            TIGHT_LABEL_SECONDS,
+            horizon,
+            max_ping_gap,
         )
         route_rows = await db().fetch(
             """
@@ -336,8 +347,8 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
               and route_id is not null
             group by route_id
             """,
-            BIAS_HORIZON_MINUTES,
-            TIGHT_LABEL_SECONDS,
+            horizon,
+            max_ping_gap,
         )
         return {
             "stop_route": {
@@ -391,7 +402,14 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
         return await cache.get("window", resolve_window)
 
     @app.get("/api/headline", response_model=Headline)
-    async def headline() -> Headline:
+    async def headline(
+        max_ping_gap: int = Query(
+            TIGHT_LABEL_SECONDS,
+            ge=30,
+            le=3600,
+            description="Widest GPS gap behind an arrival that still counts",
+        ),
+    ) -> Headline:
         async def produce() -> Headline:
             win = await resolve_window()
             rows = await db().fetch(
@@ -413,21 +431,28 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                 """,
                 win.test_from,
                 win.test_to,
-                TIGHT_LABEL_SECONDS,
+                max_ping_gap,
             )
             return Headline(
                 window=win,
                 rows=[SourceHorizon(**dict(row)) for row in rows],
-                label_filter_seconds=TIGHT_LABEL_SECONDS,
+                label_filter_seconds=max_ping_gap,
             )
 
-        return await cache.get("headline", produce)
+        # The key carries every parameter that changes the result. Without that,
+        # moving a setting would return the previous setting's numbers for up to
+        # a minute with nothing on screen saying so.
+        return await cache.get(f"headline:{max_ping_gap}", produce)
 
     @app.get("/api/routes", response_model=list[RouteComparison])
     async def routes(
         horizon: int = Query(10, description="Horizon in minutes"),
         min_n: int = Query(100, description="Minimum pairs for a route to appear"),
+        max_ping_gap: int = Query(TIGHT_LABEL_SECONDS, ge=30, le=3600),
+        compare: str = Query("lgbm", description="Predictor to compare MTS against"),
     ) -> list[RouteComparison]:
+        validate_source(compare)
+
         async def produce() -> list[RouteComparison]:
             win = await resolve_window()
             rows = await db().fetch(
@@ -438,7 +463,7 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                        (avg(pe.abs_error_seconds)
                         filter (where pe.source = 'mts'))::float8         as mts_mae_seconds,
                        (avg(pe.abs_error_seconds)
-                        filter (where pe.source = 'lgbm'))::float8        as model_mae_seconds
+                        filter (where pe.source = $6))::float8            as model_mae_seconds
                 from prediction_errors pe
                 left join routes r
                        on r.feed_version = pe.feed_version and r.route_id = pe.route_id
@@ -454,8 +479,9 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                 win.test_from,
                 win.test_to,
                 horizon,
-                TIGHT_LABEL_SECONDS,
+                max_ping_gap,
                 min_n,
+                compare,
             )
             out = []
             for row in rows:
@@ -473,11 +499,12 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                 )
             return out
 
-        return await cache.get(f"routes:{horizon}:{min_n}", produce)
+        return await cache.get(f"routes:{horizon}:{min_n}:{max_ping_gap}:{compare}", produce)
 
     @app.get("/api/error-distribution", response_model=list[DistributionBucket])
     async def error_distribution(
         horizon: int = Query(10, description="Horizon in minutes"),
+        max_ping_gap: int = Query(TIGHT_LABEL_SECONDS, ge=30, le=3600),
     ) -> list[DistributionBucket]:
         async def produce() -> list[DistributionBucket]:
             win = await resolve_window()
@@ -497,7 +524,7 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                 win.test_from,
                 win.test_to,
                 horizon,
-                TIGHT_LABEL_SECONDS,
+                max_ping_gap,
             )
             return [
                 DistributionBucket(
@@ -508,10 +535,17 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                 for row in rows
             ]
 
-        return await cache.get(f"dist:{horizon}", produce)
+        return await cache.get(f"dist:{horizon}:{max_ping_gap}", produce)
 
     @app.get("/api/data-quality", response_model=DataQuality)
-    async def data_quality() -> DataQuality:
+    async def data_quality(
+        max_ping_gap: int = Query(
+            TIGHT_LABEL_SECONDS,
+            ge=30,
+            le=3600,
+            description="The label quality filter the caller is applying elsewhere",
+        ),
+    ) -> DataQuality:
         async def produce() -> DataQuality:
             coverage = await db().fetch(
                 """
@@ -556,15 +590,16 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                     "Collection runs on a laptop, so sleep produces gaps. "
                     "Coverage per day is shown rather than assumed.",
                     "Arrival times are inferred from GPS by interpolation, so a wide "
-                    "ping gap means a weaker label. The headline excludes arrivals "
-                    "with gaps over 3 minutes.",
+                    "ping gap means a weaker label. The headline currently excludes "
+                    f"arrivals with gaps over {max_ping_gap // 60} min "
+                    f"{max_ping_gap % 60}s.",
                     "The model is at parity with MTS, not ahead. Differences of a few "
                     "percent on this much data are inside the noise.",
                     "No weekend data yet: collection began on a Monday.",
                 ],
             )
 
-        return await cache.get("quality", produce)
+        return await cache.get(f"quality:{max_ping_gap}", produce)
 
     @app.get("/api/model-run", response_model=ModelRun | None)
     async def model_run() -> ModelRun | None:
@@ -654,7 +689,9 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
         stop_id: str,
         horizon: int = Query(10, description="Horizon in minutes"),
         limit: int = Query(25, le=200),
+        compare: str = Query("lgbm", description="Predictor to compare MTS against"),
     ) -> StopDetail:
+        validate_source(compare)
         name = await db().fetchval("select max(stop_name) from stops where stop_id = $1", stop_id)
         rows = await db().fetch(
             """
@@ -662,11 +699,11 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                    pe.horizon_minutes,
                    max(pe.predicted_arrival) filter (where pe.source = 'mts')
                                                           as mts_predicted,
-                   max(pe.predicted_arrival) filter (where pe.source = 'lgbm')
+                   max(pe.predicted_arrival) filter (where pe.source = $4)
                                                           as model_predicted,
                    max(pe.error_seconds) filter (where pe.source = 'mts')
                                                           as mts_error_seconds,
-                   max(pe.error_seconds) filter (where pe.source = 'lgbm')
+                   max(pe.error_seconds) filter (where pe.source = $4)
                                                           as model_error_seconds,
                    max(st.arrival_seconds)                as scheduled_seconds,
                    max(pe.start_date)                     as start_date
@@ -684,6 +721,7 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
             stop_id,
             horizon,
             limit,
+            compare,
         )
 
         recent = []
@@ -714,6 +752,16 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
     async def stop_upcoming(
         stop_id: str,
         limit: int = Query(8, le=30, description="How many services to return"),
+        horizon: int = Query(
+            BIAS_HORIZON_MINUTES,
+            description="Which horizon's measured bias drives the correction",
+        ),
+        min_sample: int = Query(
+            MIN_STOP_ROUTE_SAMPLE,
+            ge=1,
+            le=5000,
+            description="Arrivals required before a stop-and-route bias is used",
+        ),
     ) -> StopUpcoming:
         """Live arrivals at a stop, with MTS's estimate and our corrected one.
 
@@ -721,7 +769,10 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
         It is a statistical correction, not live model inference, and the response
         carries the basis and sample size so the client can say which.
         """
-        bias = await cache.get("bias", _load_bias)
+        bias = await cache.get(
+            f"bias:{horizon}:{TIGHT_LABEL_SECONDS}",
+            lambda: _load_bias(horizon, TIGHT_LABEL_SECONDS),
+        )
         stop_bias: dict[tuple[str, str], tuple[int, float]] = bias["stop_route"]
         route_bias: dict[str, tuple[int, float]] = bias["route"]
 
@@ -765,6 +816,10 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                 pair[1] if pair else None,
                 single[0] if single else None,
                 single[1] if single else None,
+                min_stop_route=min_sample,
+                # The route level threshold scales with the stop level one, so a
+                # viewer loosening the evidence requirement loosens both.
+                min_route=max(min_sample * 3, 1),
             )
 
             corrected = (

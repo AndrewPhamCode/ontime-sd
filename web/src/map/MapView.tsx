@@ -40,6 +40,8 @@ interface Props {
   onSelect: (stopId: string) => void;
   place: MapPlace;
   flyTo: { center: [number, number]; zoom: number } | null;
+  showVehicles: boolean;
+  showStopLabels: boolean;
 }
 
 type Tween = {
@@ -58,11 +60,33 @@ function metresBetween(a: readonly [number, number], b: readonly [number, number
   return Math.hypot(dx, dy);
 }
 
-export function MapView({ stops, vehicles, selected, onSelect, place, flyTo }: Props) {
+export function MapView({
+  stops,
+  vehicles,
+  selected,
+  onSelect,
+  place,
+  flyTo,
+  showVehicles,
+  showStopLabels,
+}: Props) {
   const container = useRef<HTMLDivElement | null>(null);
   const map = useRef<maplibregl.Map | null>(null);
   const [ready, setReady] = useState(false);
   const tweens = useRef(new Map<string, Tween>());
+
+  // Visibility is toggled on the live layers rather than by rebuilding the map,
+  // so flipping a switch does not drop the viewport or the icon atlas.
+  useEffect(() => {
+    const instance = map.current;
+    if (!instance || !ready) return;
+    instance.setLayoutProperty('vehicles', 'visibility', showVehicles ? 'visible' : 'none');
+    instance.setLayoutProperty(
+      'stops',
+      'text-field',
+      showStopLabels ? ['step', ['zoom'], '', 13.5, ['get', 'stop_name']] : '',
+    );
+  }, [ready, showVehicles, showStopLabels]);
 
   useEffect(() => {
     if (!container.current || map.current) return;

@@ -480,3 +480,207 @@ async def test_vehicles_carry_a_route_label_for_the_map(
 
     assert body[0]["route_short_name"] == "30"
     assert body[0]["route_type"] == 3
+
+
+# --- settings: parameters must reach the query and the cache key --------------
+#
+# Every one of these endpoints caches its aggregate. Before the settings work
+# the cache keys contained none of the parameters, so changing a setting
+# returned the previous setting's numbers for up to a minute with nothing on
+# screen saying so. The tests below pass a parameter, then a different one, back
+# to back inside the TTL, and require the answer to change.
+
+
+async def _seed_poorly_observed(pool: asyncpg.Pool) -> None:
+    """A second arrival whose GPS evidence is weak, and badly mispredicted.
+
+    It is excluded by the default label filter and admitted by a loose one, so
+    the two filter settings must produce different numbers.
+    """
+    await pool.execute(
+        """
+        insert into arrivals (start_date, trip_id, stop_sequence, feed_version,
+                              stop_id, vehicle_id, arrived_at, method, ping_gap_seconds)
+        values ($1::date, 'trip-1', 9, $2::text, 'stop-A', 'bus-2',
+                $3::timestamptz, 'interpolated', 600)
+        """,
+        DAY_TEST,
+        VERSION,
+        ARRIVED,
+    )
+    for source in ("mts", "lgbm"):
+        for horizon in (1, 5, 10, 20):
+            await pool.execute(
+                """
+                insert into prediction_errors (
+                    start_date, trip_id, stop_sequence, horizon_minutes, source,
+                    feed_version, stop_id, route_id, arrived_at, predicted_arrival,
+                    predicted_at, error_seconds, abs_error_seconds, ping_gap_seconds,
+                    service_minute, is_weekend, has_all_horizons)
+                values ($1::date,'trip-1',9,$2::int,$3::text,$4::text,
+                        'stop-A','route-9',
+                        $5::timestamptz,
+                        $5::timestamptz + (900 * interval '1 second'),
+                        $5::timestamptz - ($2::int * interval '1 minute'),
+                        900, 900, 600, 720, false, true)
+                """,
+                DAY_TEST,
+                horizon,
+                source,
+                VERSION,
+                ARRIVED,
+            )
+
+
+@pytest.mark.usefixtures("clean")
+async def test_headline_cache_is_keyed_on_the_label_filter(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    await _seed(db_pool)
+    await _seed_poorly_observed(db_pool)
+
+    tight = (await client.get("/api/headline?max_ping_gap=180")).json()
+    loose = (await client.get("/api/headline?max_ping_gap=900")).json()
+
+    def mae(body: dict, source: str) -> float:
+        row = next(r for r in body["rows"] if r["source"] == source and r["horizon_minutes"] == 10)
+        return float(row["mae_seconds"])
+
+    # The tight filter sees only the well observed arrival, which MTS missed by
+    # 120s. The loose one also admits the 900s miss, so the average must rise.
+    assert mae(tight, "mts") == pytest.approx(120.0)
+    assert mae(loose, "mts") > mae(tight, "mts")
+    assert tight["label_filter_seconds"] == 180
+    assert loose["label_filter_seconds"] == 900
+
+
+@pytest.mark.usefixtures("clean")
+async def test_distribution_cache_is_keyed_on_the_label_filter(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    await _seed(db_pool)
+    await _seed_poorly_observed(db_pool)
+
+    tight = (await client.get("/api/error-distribution?horizon=10&max_ping_gap=180")).json()
+    loose = (await client.get("/api/error-distribution?horizon=10&max_ping_gap=900")).json()
+
+    assert sum(b["n"] for b in loose) > sum(b["n"] for b in tight)
+
+
+@pytest.mark.usefixtures("clean")
+async def test_routes_cache_is_keyed_on_the_label_filter_and_predictor(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    await _seed(db_pool)
+    await _seed_poorly_observed(db_pool)
+
+    tight = (await client.get("/api/routes?horizon=10&min_n=1&max_ping_gap=180")).json()
+    loose = (await client.get("/api/routes?horizon=10&min_n=1&max_ping_gap=900")).json()
+    assert tight[0]["n"] < loose[0]["n"]
+
+    # Switching the compared predictor must not return the previous one's column.
+    lgbm = (await client.get("/api/routes?horizon=10&min_n=1&compare=lgbm")).json()
+    mts = (await client.get("/api/routes?horizon=10&min_n=1&compare=mts")).json()
+    assert lgbm[0]["model_mae_seconds"] != mts[0]["model_mae_seconds"]
+    # Comparing MTS against itself is a no-op by construction, which is a useful
+    # sanity check that the parameter reaches the aggregate at all.
+    assert mts[0]["model_mae_seconds"] == pytest.approx(mts[0]["mts_mae_seconds"])
+
+
+@pytest.mark.usefixtures("clean")
+async def test_data_quality_caveat_states_the_filter_actually_in_use(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    await _seed(db_pool)
+
+    default = (await client.get("/api/data-quality")).json()
+    loose = (await client.get("/api/data-quality?max_ping_gap=900")).json()
+
+    # The caveat is prose a reader trusts, so it has to track the setting rather
+    # than repeat the constant it was written against.
+    assert any("3 min" in c for c in default["caveats"])
+    assert any("15 min" in c for c in loose["caveats"])
+
+
+@pytest.mark.usefixtures("clean")
+async def test_stop_detail_cache_is_keyed_on_the_predictor(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    await _seed(db_pool)
+
+    lgbm = (await client.get("/api/stops/stop-A?horizon=10&compare=lgbm")).json()
+    mts = (await client.get("/api/stops/stop-A?horizon=10&compare=mts")).json()
+
+    assert lgbm["recent"][0]["model_error_seconds"] == pytest.approx(60.0)
+    assert mts["recent"][0]["model_error_seconds"] == pytest.approx(120.0)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/routes?horizon=10&compare=nonsense",
+        "/api/stops/stop-A?compare=nonsense",
+    ],
+)
+async def test_an_unknown_predictor_is_rejected_not_silently_empty(
+    client: httpx.AsyncClient, path: str
+) -> None:
+    # An empty column reads as "the model has no data for this", which is a very
+    # different claim from "that predictor does not exist".
+    response = await client.get(path)
+    assert response.status_code == 422
+
+
+async def test_every_known_predictor_is_accepted(client: httpx.AsyncClient) -> None:
+    from ontime_sd.api import SOURCES, validate_source
+
+    for source in SOURCES:
+        assert validate_source(source) == source
+
+
+def test_cache_entries_do_not_collide_across_parameters() -> None:
+    """The cache itself, independent of any endpoint.
+
+    This is the invariant the endpoints rely on: a key is only a cache hit for
+    the exact same key, so a key that omits a parameter serves the wrong answer.
+    """
+    import asyncio
+
+    from ontime_sd.api import _TtlCache
+
+    async def exercise() -> None:
+        cache = _TtlCache(ttl=60)
+        calls: list[str] = []
+
+        async def produce(tag: str) -> str:
+            calls.append(tag)
+            return tag
+
+        assert await cache.get("headline:180", lambda: produce("tight")) == "tight"
+        assert await cache.get("headline:900", lambda: produce("loose")) == "loose"
+        # The second key must have produced its own value, not reused the first.
+        assert calls == ["tight", "loose"]
+        # And the same key within the TTL must not produce again.
+        assert await cache.get("headline:180", lambda: produce("again")) == "tight"
+        assert calls == ["tight", "loose"]
+
+    asyncio.run(exercise())
+
+
+def test_the_minimum_sample_threshold_is_a_parameter_not_a_constant() -> None:
+    """The setting has to reach the decision, or the panel would lie."""
+    from ontime_sd.api import BASIS_NONE, BASIS_STOP_ROUTE, choose_bias
+
+    # Three observations: refused at the default, allowed when the viewer lowers
+    # the bar, and the basis says which happened either way.
+    _, basis, _ = choose_bias(3, -300.0, 0, None)
+    assert basis == BASIS_NONE
+
+    bias, basis, sample = choose_bias(3, -300.0, 0, None, min_stop_route=1)
+    assert basis == BASIS_STOP_ROUTE
+    assert bias == pytest.approx(-300.0)
+    assert sample == 3
+
+    # Raising it past the evidence refuses a correction that the default allowed.
+    _, basis, _ = choose_bias(91, -131.0, 0, None, min_stop_route=100)
+    assert basis == BASIS_NONE

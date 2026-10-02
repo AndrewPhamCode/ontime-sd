@@ -12,6 +12,10 @@ export interface VehicleFeed {
  *  The feed itself only refreshes every 30 seconds upstream, so polling faster
  *  than that buys nothing. Ten seconds keeps the page responsive to a new poll
  *  landing without hammering the API.
+ *
+ *  An interval of 0 fetches once and then stops, which is what the "off"
+ *  refresh setting means: the viewer still sees where the buses are, but the
+ *  page stops asking.
  */
 export function useVehicles(intervalMs = 10_000): VehicleFeed {
   const [feed, setFeed] = useState<VehicleFeed>({
@@ -36,7 +40,7 @@ export function useVehicles(intervalMs = 10_000): VehicleFeed {
           }));
         }
       }
-      if (active) timer = setTimeout(tick, intervalMs);
+      if (active && intervalMs > 0) timer = setTimeout(tick, intervalMs);
     };
 
     void tick();

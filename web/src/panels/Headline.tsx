@@ -9,6 +9,7 @@ import {
   formatMinutes,
   formatSignedMinutes,
 } from '../lib/format';
+import { useParams } from '../settings/useParams';
 import { useApi } from '../lib/useApi';
 import { Card, Empty, Failed, Pending } from './Card';
 
@@ -16,7 +17,11 @@ import { Card, Empty, Failed, Pending } from './Card';
  *  table, because the honest result is parity and a single figure would hide
  *  that. N appears on every row. */
 export function Headline() {
-  const { data, error, loading } = useApi<HeadlineData>(() => api.headline());
+  const params = useParams();
+  const { data, error, loading } = useApi<HeadlineData>(
+    () => api.headline(params),
+    [params],
+  );
 
   if (loading)
     return (

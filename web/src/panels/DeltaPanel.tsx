@@ -1,5 +1,6 @@
 import { api, type Headline as HeadlineData } from '../api/client';
 import { deltaVsMts, formatCount, formatSignedMinutes } from '../lib/format';
+import { useParams } from '../settings/useParams';
 import { useApi } from '../lib/useApi';
 import { Card, Empty, Failed, Pending } from './Card';
 
@@ -9,7 +10,11 @@ import { Card, Empty, Failed, Pending } from './Card';
  *  Direction uses status colour, and every bar carries an icon and a signed
  *  number, so the state never rests on colour alone. */
 export function DeltaPanel() {
-  const { data, error, loading } = useApi<HeadlineData>(() => api.headline());
+  const params = useParams();
+  const { data, error, loading } = useApi<HeadlineData>(
+    () => api.headline(params),
+    [params],
+  );
 
   if (loading)
     return (

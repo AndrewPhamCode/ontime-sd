@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Analysis } from './views/Analysis';
 import { MapApp } from './views/MapApp';
+import { SettingsProvider, useSettings } from './settings/SettingsContext';
+import { SettingsPanel } from './settings/SettingsPanel';
+import { isModified } from './settings/settings';
 
 type Tab = 'map' | 'analysis';
 type Theme = 'light' | 'dark';
@@ -16,8 +19,21 @@ function useTheme(): [Theme, () => void] {
 }
 
 export function App() {
+  return (
+    <SettingsProvider>
+      <Shell />
+    </SettingsProvider>
+  );
+}
+
+function Shell() {
   const [tab, setTab] = useState<Tab>('map');
   const [theme, toggleTheme] = useTheme();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const { settings } = useSettings();
+  // A screenshot of a configured app should not be mistakable for a screenshot
+  // of the project's actual result, so a moved setting is visible in the bar.
+  const modified = isModified(settings);
 
   return (
     <div className="app">
@@ -49,16 +65,37 @@ export function App() {
           <button className="toggle" onClick={toggleTheme}>
             {theme === 'dark' ? 'Light' : 'Dark'}
           </button>
+          <button
+            className={modified ? 'toggle modified' : 'toggle'}
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Settings"
+          >
+            <span aria-hidden="true">&#9881;</span> Settings
+            {modified ? <span className="modified-dot" aria-hidden="true" /> : null}
+          </button>
         </div>
       </nav>
+
+      {modified ? (
+        <div className="modified-banner">
+          Settings have been changed from the project defaults, so these are not the figures
+          the write-up quotes.{' '}
+          <button className="linklike" onClick={() => setSettingsOpen(true)}>
+            Review or reset them
+          </button>
+          .
+        </div>
+      ) : null}
 
       {tab === 'map' ? (
         <MapApp onShowEvidence={() => setTab('analysis')} />
       ) : (
         <div className="scroll-area">
-          <Analysis />
+          <Analysis onOpenSettings={() => setSettingsOpen(true)} />
         </div>
       )}
+
+      {settingsOpen ? <SettingsPanel onClose={() => setSettingsOpen(false)} /> : null}
     </div>
   );
 }
