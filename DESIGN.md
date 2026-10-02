@@ -1282,3 +1282,109 @@ trains on them, and `ping_gap_seconds` is the first thing to filter on.
 A trip served by two vehicles is a mid route swap, and mixing two buses' GPS would
 produce a track that teleports. The vehicle with more fixes is taken as the one
 that ran it and the other is skipped: 32 over one day.
+
+---
+
+## ADR-0037: How MTS prediction error is defined and measured
+
+**Status:** Accepted
+
+**Decision.** For an arrival that actually happened at `A` and a horizon `h`, the
+prediction scored is the most recent `predictions` row for
+`(start_date, trip_id, stop_sequence)` whose `observed_at` falls in
+`[A - h - 2 hours, A - h]`. Error is `predicted arrival minus A`, signed, with the
+absolute value stored alongside. The headline figure uses only arrivals that have a
+prediction at every horizon, and only arrivals whose Phase 3 ping gap was 3 minutes
+or less.
+
+**The horizon is measured back from the actual arrival, not the predicted one.**
+"Twenty minutes before the bus really came, what was MTS saying" is what a rider
+experiences. Measuring back from the predicted arrival is self-referential: the
+worse a prediction, the further the evaluation point drifts from the real event, so
+bad predictions would be graded at a more forgiving moment.
+
+**The most recent prediction at or before the cutoff is the one in force.** Because
+predictions are stored change-only (ADR-0005), that row may have been written much
+earlier, and no row in between means MTS did not change its mind. This is the
+lookup the Phase 2 tests already proved runs as a backward scan of the
+`predictions` primary key.
+
+**A prediction more than two hours stale is rejected.** Legitimate pairs have a
+median prediction age of 4.1 minutes and p95 of 23.4 minutes, so this excludes
+nothing real. It exists because a prediction MTS has not revised in hours is a
+leftover rather than a live estimate, and because of the bug below.
+
+**Horizons are compared on a common subset.** Availability falls from 94.7% at one
+minute to 58.4% at twenty, so scoring each horizon over whatever it has would
+compare different populations and make the horizon trend meaningless. A second
+table reports all available pairs, which answers "how wrong is MTS overall" rather
+than "how does error grow with lead time".
+
+**The headline filters to well observed arrivals.** 24.6% of Phase 3 arrivals were
+interpolated across ping gaps over 10 minutes and carry real uncertainty of their
+own. Including them measures this project's GPS coverage as if it were MTS's error.
+
+### The result
+
+Comparable subset, well observed arrivals, N = 198,878 per horizon, five service
+days:
+
+| Horizon | MAE | Median | p90 | Bias |
+| --- | --- | --- | --- | --- |
+| 1 min | **0.90 min** | 0.62 | 1.65 | -0.12 |
+| 5 min | **1.36 min** | 1.02 | 2.80 | -0.24 |
+| 10 min | **1.70 min** | 1.27 | 3.60 | -0.45 |
+| 20 min | **2.23 min** | 1.62 | 4.85 | -0.94 |
+
+This is the baseline Phase 5 has to beat.
+
+### A bug worth recording, because of how it presented
+
+The first run produced an MAE of 6.45 minutes at the one minute horizon, with a p90
+of 1.70 minutes. **A mean above the 90th percentile is structurally impossible for a
+well behaved distribution**, and that inconsistency is what exposed the fault
+rather than any individual number looking wrong. Had the mean been merely high it
+would have been easy to accept.
+
+The cause was a residual service-day misalignment. Phase 3 backfilled
+`vehicle_positions.start_date` but deliberately skipped `predictions.start_date`,
+on the grounds that it is part of that table's primary key and a moved row might
+collide. So for the 88 trips scheduled entirely past midnight, arrivals sat on the
+corrected service day while predictions still sat on the wrong one, and the join
+matched the previous night's run of the same trip id. 808 pairs picked up errors of
+roughly 24 hours, which destroyed the mean while leaving the median untouched.
+
+The deferred caution turned out to be unfounded: 44,870 rows needed moving and
+**zero would have collided**, because `observed_at` is also in the key and the two
+runs are 24 hours apart. Had the backfill been done when the rest was, this would
+never have arisen. The lesson is that deferring a fix on an unmeasured risk is
+itself a risk, and measuring it took one query.
+
+### What the data says beyond the headline
+
+- **Error grows with lead time**, roughly 0.9 to 2.2 minutes from one to twenty
+  minutes out. That is the shape the project predicted and is the room a model has
+  to work in.
+- **MTS runs slightly optimistic, increasingly so with horizon**: bias moves from
+  -0.12 to -0.94 minutes, meaning it predicts arrivals a little earlier than they
+  happen. A consistent bias is the cheapest thing for a model to correct.
+- **Rail is predicted far better than road.** The best routes are 530 (Green Line,
+  0.90 min) and 510 (Blue Line, 1.02 min), both trolley lines. The worst is 894
+  (Morena/Campo to El Cajon, 4.48 min), a long rural bus route. Trolleys do not sit
+  in traffic.
+- **The afternoon peak is the hardest window**, 1.89 minutes MAE for 15:00 to
+  18:00, against 1.30 minutes after midnight.
+- **Label noise is material at short horizons and not at long ones.** At one minute,
+  MAE is 0.90 on tight labels and 1.95 on poor ones; at twenty minutes it is 2.23
+  against 2.73. Close in, this project's own GPS gaps dominate the measurement;
+  further out, MTS's error does. That is an argument for improving collection
+  coverage before trusting any short horizon result.
+
+**At scale, and what this number is not.** Five service days at 35 to 70%
+collection coverage. The method is sound and the figures are real, but they are a
+preliminary sample, not a published statistic. Routes with few observed trips are
+noisy, which is why the per route tables require at least 200 pairs. There is **no
+weekend data at all**, because collection began on a Monday, so the weekday versus
+weekend split the charter asks for cannot yet be computed. Re-running over several
+weeks of good coverage is the first thing to do before quoting these numbers
+anywhere.

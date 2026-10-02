@@ -16,6 +16,7 @@ ontime-mock = "ontime_sd.mock.server:main"
 ontime-migrate = "ontime_sd.db:migrate_main"
 ontime-load-gtfs = "ontime_sd.gtfs_load:main"
 ontime-infer-arrivals = "ontime_sd.arrival_store:main"
+ontime-evaluate = "ontime_sd.evaluate:main"
 
 [dependency-groups]
 dev = [

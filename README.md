@@ -11,11 +11,22 @@ One number decides whether this project worked: **mean absolute error of arrival
 predictions, ours against MTS's official predictions**, broken down by how far
 ahead the prediction was made (1, 5, 10, and 20 minutes out).
 
-**That number does not exist yet, and this README will say so until it does.** The
-MTS realtime API key has now arrived, so real collection can begin, but the metric
-needs weeks of accumulated history before it means anything. Until then everything
-here is infrastructure built to make the measurement possible, not the measurement
-itself.
+**The baseline now exists.** Measured over five service days, on 198,878 arrivals
+reconstructed from GPS, MTS's own predictions have a mean absolute error of:
+
+| Horizon | MAE | p90 |
+| --- | --- | --- |
+| 1 minute | **0.90 min** | 1.65 min |
+| 5 minutes | **1.36 min** | 2.80 min |
+| 10 minutes | **1.70 min** | 3.60 min |
+| 20 minutes | **2.23 min** | 4.85 min |
+
+That is the number to beat, and nothing here beats it yet: the model is Phase 5.
+
+Read these as a preliminary sample rather than a published statistic. They come
+from five days at 35 to 70% collection coverage, there is no weekend data, and
+error at short horizons is partly this project's own GPS gaps rather than MTS's.
+All of that is quantified in [DESIGN.md](DESIGN.md) ADR-0037 rather than hidden.
 
 Being specific about what is unproven matters more here than a good demo. A
 prediction system that cannot state its error honestly is not a prediction system.
@@ -26,8 +37,8 @@ prediction system that cannot state its error honestly is not a prediction syste
 | --- | --- | --- |
 | 1. Realtime collector | **Done**, running | No, built against a mock feed |
 | 2. Static GTFS loader | **Done**, real feed loaded | No, the schedule is a public download |
-| 3. Arrival inference | Not started | Needs real GPS, mock is too clean |
-| 4. Baseline evaluation | Not started | This is where the metric comes from |
+| 3. Arrival inference | **Done**, 613k arrivals | Needs real GPS, mock is too clean |
+| 4. Baseline evaluation | **Done**, number measured | This is where the metric comes from |
 | 5. Model | Not started | Needs weeks of real history |
 | 6. API and map | Not started | Yes |
 | 7. Production deploy | Not started | Yes |
