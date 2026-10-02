@@ -52,6 +52,12 @@ load-gtfs-force: ## Reload the schedule even if unchanged or already loaded
 infer-arrivals: ## Reconstruct arrivals from GPS for yesterday and today
 	uv run ontime-infer-arrivals --days 2
 
+evaluate: ## Score MTS predictions against inferred arrivals
+	uv run ontime-evaluate --days 2
+
+baseline: ## THE NUMBER: MTS prediction error by horizon, route, time of day
+	docker compose exec -T postgres psql -U ontime -d ontime_sd -f /dev/stdin < scripts/baseline.sql
+
 arrivals: ## Show inferred arrival counts and quality
 	docker compose exec -T postgres psql -U ontime -d ontime_sd -f /dev/stdin < scripts/arrivals.sql
 
@@ -75,4 +81,4 @@ coverage: ## Show collection coverage and feed health from poll_log
 
 .PHONY: help install up down nuke migrate mock run test lint fmt psql health \
 	service-install service-uninstall service-status service-logs coverage \
-	load-gtfs load-gtfs-force schedule infer-arrivals arrivals
+	load-gtfs load-gtfs-force schedule infer-arrivals arrivals evaluate baseline
