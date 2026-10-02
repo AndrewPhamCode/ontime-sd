@@ -55,6 +55,12 @@ infer-arrivals: ## Reconstruct arrivals from GPS for yesterday and today
 evaluate: ## Score MTS predictions against inferred arrivals
 	uv run ontime-evaluate --days 2
 
+model: ## Fit and score our predictors (train Sep 28-30, test Oct 1-2)
+	uv run ontime-model --train-from 2026-09-28 --train-to 2026-09-30 --test-from 2026-10-01 --test-to 2026-10-02
+
+compare: ## HEAD TO HEAD: our predictors vs MTS
+	docker compose exec -T postgres psql -U ontime -d ontime_sd -f /dev/stdin < scripts/compare.sql
+
 baseline: ## THE NUMBER: MTS prediction error by horizon, route, time of day
 	docker compose exec -T postgres psql -U ontime -d ontime_sd -f /dev/stdin < scripts/baseline.sql
 
@@ -81,4 +87,4 @@ coverage: ## Show collection coverage and feed health from poll_log
 
 .PHONY: help install up down nuke migrate mock run test lint fmt psql health \
 	service-install service-uninstall service-status service-logs coverage \
-	load-gtfs load-gtfs-force schedule infer-arrivals arrivals evaluate baseline
+	load-gtfs load-gtfs-force schedule infer-arrivals arrivals evaluate baseline model compare

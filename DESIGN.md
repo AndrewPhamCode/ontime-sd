@@ -1388,3 +1388,108 @@ weekend data at all**, because collection began on a Monday, so the weekday vers
 weekend split the charter asks for cannot yet be computed. Re-running over several
 weeks of good coverage is the first thing to do before quoting these numbers
 anywhere.
+
+---
+
+## ADR-0038: Three predictors, one table, and the leak that nearly produced a false result
+
+**Status:** Accepted
+
+**Decision.** Three predictors are scored against MTS by writing into
+`prediction_errors` with a `source` column, so the head-to-head is one `GROUP BY`
+over one population scored by one definition:
+
+- `persist_delay`: scheduled arrival plus however late the vehicle already is
+- `segment_mean`: anchor arrival plus the historical mean travel time of each
+  segment ahead, the charter's specified baseline
+- `lgbm`: gradient boosting on features known at the cutoff, L1 objective to match
+  the metric being reported
+
+All three forecast from the same **anchor**, the last stop whose arrival was
+knowable at the cutoff. The split is time-based: train on 2026-09-28 to 09-30, test
+on 10-01 to 10-02.
+
+`persist_delay` exists because it is the honest obvious thing. A gradient boosted
+model that beats MTS but loses to "assume it stays as late as it is now" has
+demonstrated nothing, and a single headline number would hide that.
+
+### The leak, which is the most important thing in this record
+
+The first honest-looking run said the model beat MTS at every horizon: **0.63
+against 0.93 minutes at one minute out, a 32% reduction.** That is a suspicious
+result, because at one minute out MTS can see the vehicle in real time while this
+model sees only the previous stop. So it was tested rather than published.
+
+The anchor was being selected on `arrived_at <= cutoff`. But an arrival time is
+**inferred**, by interpolating between the two pings that bracket the stop (Phase
+3, ADR-0036), so it only becomes knowable once the *later* ping has been received.
+Selecting on `arrived_at` alone let a prediction use a timestamp that was itself
+computed from GPS received after the cutoff.
+
+Restricting to anchors whose interpolation window had closed before the cutoff
+changed the picture completely:
+
+| Horizon | MTS | lgbm, loose anchor | MTS | lgbm, strict anchor |
+| --- | --- | --- | --- | --- |
+| 1 min | 0.93 | **0.63** | 0.84 | 0.79 |
+| 5 min | 1.39 | **1.18** | 1.32 | 1.34 |
+| 10 min | 1.71 | **1.58** | 1.63 | 1.74 |
+| 20 min | 2.19 | **2.20** | 2.16 | 2.43 |
+
+The apparent win was the leak. The anchor condition is now
+`arrived_at + ping_gap_seconds <= cutoff`, enforced in the one query that selects
+anchors, with a test that builds an anchor whose window crosses the cutoff and
+asserts it is refused.
+
+**The general lesson.** The leak was not a careless mistake like feeding the model
+its own label. It came from the labels being *derived* rather than observed, which
+made "available at time T" a subtler question than it looks. Any pipeline that
+infers its own ground truth has this hazard. The only reason it was caught is that
+the result was too good for the information the model had, and that was treated as
+evidence rather than success.
+
+### The honest result
+
+Test window only, comparable subset, well observed arrivals, N = 50,591 per
+horizon. MAE in minutes:
+
+| Horizon | MTS | persist_delay | segment_mean | **lgbm** |
+| --- | --- | --- | --- | --- |
+| 1 min | 0.93 | 1.23 | 0.96 | **0.89** |
+| 5 min | 1.40 | 2.00 | 1.58 | **1.38** |
+| 10 min | 1.77 | 2.77 | 2.10 | **1.73** |
+| 20 min | 2.31 | 4.35 | 2.98 | **2.31** |
+
+p90, where the model does rather better:
+
+| Horizon | MTS | **lgbm** |
+| --- | --- | --- |
+| 5 min | 2.85 | **2.75** |
+| 10 min | 3.78 | **3.55** |
+| 20 min | 5.08 | **4.84** |
+
+**This is parity, not a win.** The MAE improvements of 2 to 4% on five days of data
+are inside the noise, and the project should not claim to beat MTS on this
+evidence. The p90 improvement at longer horizons is the more interesting signal,
+since it suggests the model handles the bad cases somewhat better.
+
+### What the baselines show
+
+- **`persist_delay` degrades fast with horizon**, 1.23 to 4.35 minutes. Current
+  lateness is strong information for the next stop and decays quickly, which is
+  exactly the behaviour expected and a useful sanity check on the anchor logic.
+- **`segment_mean` is worse than MTS at every horizon.** It throws away the
+  vehicle's current lateness entirely, which the comparison with `persist_delay` at
+  one minute makes obvious. The charter specified it as the baseline; the data says
+  it is the weaker of the two simple approaches except at long horizons.
+- **`lgbm` beats both baselines at every horizon**, which is the minimum bar for the
+  model being worth having at all.
+- Bias: MTS -0.46, lgbm -0.34 minutes. Both predict slightly early; the model
+  slightly less so.
+
+**At scale.** Five service days at 35 to 70% collection coverage, and 1.8M training
+rows drawn from only three of those days. The pipeline reruns with
+`make model && make compare`, so the number improves as the collector keeps going,
+which is the real deliverable here rather than today's figure. `model_runs` records
+the window, features and parameters behind every run so a quoted number is
+traceable. There is still no weekend data, so the weekday split remains uncomputable.

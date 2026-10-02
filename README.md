@@ -21,7 +21,11 @@ reconstructed from GPS, MTS's own predictions have a mean absolute error of:
 | 10 minutes | **1.70 min** | 3.60 min |
 | 20 minutes | **2.23 min** | 4.85 min |
 
-That is the number to beat, and nothing here beats it yet: the model is Phase 5.
+That is the number to beat. A gradient boosted model now reaches **parity** with
+it, at 0.89 / 1.38 / 1.73 / 2.31 minutes, and does better on p90 at the longer
+horizons. It is not a win: differences of 2 to 4% on five days of data are inside
+the noise, and this project will not claim to beat MTS until there is enough data
+to say so.
 
 Read these as a preliminary sample rather than a published statistic. They come
 from five days at 35 to 70% collection coverage, there is no weekend data, and
@@ -39,7 +43,7 @@ prediction system that cannot state its error honestly is not a prediction syste
 | 2. Static GTFS loader | **Done**, real feed loaded | No, the schedule is a public download |
 | 3. Arrival inference | **Done**, 613k arrivals | Needs real GPS, mock is too clean |
 | 4. Baseline evaluation | **Done**, number measured | This is where the metric comes from |
-| 5. Model | Not started | Needs weeks of real history |
+| 5. Model | **Pipeline done**, at parity | Needs weeks of real history to improve |
 | 6. API and map | Not started | Yes |
 | 7. Production deploy | Not started | Yes |
 
