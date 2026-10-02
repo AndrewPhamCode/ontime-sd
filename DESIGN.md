@@ -1156,3 +1156,129 @@ realtime-plus-schedule pipeline cannot be exercised end to end offline. The fix 
 for the simulator to emit a matching static GTFS archive from its own route. That
 is worth doing before Phase 4, since Phase 4 joins the two together and would
 otherwise be testable only against live data.
+
+---
+
+## ADR-0035: The service day is derived from the schedule, not the observation clock
+
+**Status:** Accepted
+
+**Decision.** For each observation, candidate service days are the local date and
+the day before. The instant is expressed as seconds past each candidate's midnight
+and the candidate whose scheduled window contains it wins, with grace margins of
+15 minutes early and 60 minutes late. The local date is preferred when both fit and
+is the fallback when the trip has no schedule.
+
+**Why.** The real MTS feed omits `start_date` on every entity, so it has to be
+derived, and trip identity in GTFS-Realtime is `(start_date, trip_id)`. The
+original fallback used the observation date, which is correct for the great
+majority of pings and silently wrong for every trip that crosses midnight.
+
+Measured: trip 19627988 is scheduled 23:35 to 24:01. Its pings after midnight were
+filed under the following service day, together with the next night's run of the
+same trip id, producing a single trip record spanning 23.8 hours. 199 trip records
+were affected, covering 18,918 pings. Arrival inference cannot do anything sensible
+with a track that appears to jump a day, so this had to be fixed before Phase 3
+rather than worked around inside it.
+
+The margins are asymmetric because buses run late far more readily than early.
+
+**Rejected.** Having inference skip trips whose observed window far exceeds their
+scheduled duration. Cheap, and it would have hidden fewer than 1% of trips, but it
+leaves wrong data in the database for every later phase to rediscover. Also
+rejected: using the vehicle's own report time without reference to the schedule,
+which is what was already wrong.
+
+**Consequences.** Prediction ingest must resolve the service day before grouping by
+trip, since `start_date` is part of both the grouping key and the primary key:
+grouping first would split one run across two days.
+
+`vehicle_positions` was backfilled, moving 11,352 rows and reducing implausible
+trip records from 210 to 67. That column is not part of its primary key so the
+update cannot collide. `predictions.start_date` **is** part of its primary key, so
+a backfill there risks conflicts and was deliberately not done.
+
+**At scale.** The 67 remaining implausible records are buses running more than an
+hour behind, or still reporting a finished trip while sitting at a layover: median
+61 minutes past the scheduled end. Those correctly belong to the day they started.
+Daylight saving means a service day can be 23 or 25 hours long, which this handles
+because the comparison is against the candidate's own midnight; both transitions
+are covered by tests.
+
+---
+
+## ADR-0036: Arrivals are reconstructed by projecting GPS onto the route shape
+
+**Status:** Accepted
+
+**Decision.** Arrival inference runs in four stages, each a pure function: project
+each ping onto the route shape to get a distance along the route, build a
+monotonic distance versus time track, find the ping pair bracketing each stop and
+interpolate the crossing time, and detect dwell where a vehicle was seen stationary
+at a stop.
+
+**Why this approach.** It is the only one the data supports. The real feed sends a
+vehicle id, a trip id, a coordinate and a timestamp. There is no speed, no bearing,
+and no `current_stop_sequence` or `current_status`, so there is no shortcut such as
+"the feed says it is approaching stop 7". Geometry is all that is left.
+
+What makes it tractable is that MTS populates `shape_dist_traveled` on both shapes
+and stop times, so every stop already has a known distance along its route. The
+hard geometric problem reduces to projecting a point onto a polyline and comparing
+one number against another.
+
+**Key choices, and why.**
+
+*Forward bounded search rather than global nearest point.* A loop route passes the
+same coordinate twice, so a global search would snap a late fix back to the earlier
+pass. The search window runs from slightly behind the previous fix to as far ahead
+as the elapsed time allows at 35 m/s. This also bounds the cost: a global search
+would be 40 pings times 2,000 shape points per trip.
+
+*Distance is clamped non-decreasing.* GPS noise makes the raw projection wobble
+backwards, and a wobble would otherwise produce an arrival earlier than the one
+before it. Clamping is counted rather than silent, so noise stays measurable:
+18,980 clamps over one day of real data.
+
+*Fixes more than 150 m off route are dropped.* A detour, a deadheading vehicle, or
+a bad fix. Snapping it would invent a position on a route the vehicle was not on.
+12,397 pings dropped over one day.
+
+*Stops with no bracketing pair produce no arrival.* Nothing is extrapolated. With
+ping gaps reaching 843 seconds at p99, extrapolation would manufacture
+plausible-looking times that are badly wrong, and Phase 5 would train on them. A
+missing label costs one row; a wrong label corrupts the model. 40,884 stops were
+skipped over one day, against 176,781 arrivals produced.
+
+*Dwell takes precedence over interpolation.* A vehicle waiting at a stop reports
+several fixes in one place, and interpolating across that cluster would place the
+arrival in the middle of the wait rather than at its start. The start is what a
+rider experiences as the arrival. 16,776 of 176,781 arrivals were dwell detected.
+
+**Validated on real data,** one service day, 7,142 trips in 25 seconds:
+
+- **0 monotonicity violations** across 176,781 arrivals, so no projection ran
+  backwards.
+- Implied segment speeds: median 5.8 m/s, p95 12.6 m/s, which is right for urban
+  buses including stops. 91 of 169,879 segments implausible.
+- Delay against schedule: p10 -1.3 min, median +1.3 min, p90 +5.9 min. A credible
+  transit lateness distribution rather than something symmetric or wild.
+- **Cross-checked against MTS.** For 170,961 arrivals, comparing against MTS's own
+  final prediction for the same stop gives a **median absolute difference of 35
+  seconds**, p90 137 seconds. Two independent estimates of the same event agreeing
+  that closely is the strongest evidence available that the inference is sound.
+
+**Important caveat on that last figure.** 35 seconds is a measure of *this
+inference's* credibility, not of MTS's accuracy. It compares against MTS's final
+prediction, made moments before the arrival, which is trivially easy to get right.
+The project metric is error at 1, 5, 10 and 20 minutes out, which is Phase 4 and
+will be far larger.
+
+**At scale.** 1% of cross-checked arrivals disagree with MTS by more than 10
+minutes, and the mean signed difference of 302 seconds is driven by that tail
+rather than by any central bias. Those cases are worth examining before Phase 5
+trains on them, and `ping_gap_seconds` is the first thing to filter on.
+
+A trip served by two vehicles is a mid route swap, and mixing two buses' GPS would
+produce a track that teleports. The vehicle with more fixes is taken as the one
+that ran it and the other is skipped: 32 over one day.
