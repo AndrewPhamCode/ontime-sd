@@ -8,6 +8,10 @@ dependencies = [
     "asyncpg>=0.30",
     "gtfs-realtime-bindings>=1.0",
     "python-dotenv>=1.0",
+    # Phase 5. LightGBM needs OpenMP; on macOS that may mean `brew install libomp`.
+    "lightgbm>=4.5",
+    "numpy>=2.0",
+    "pandas>=2.2",
 ]
 
 [project.scripts]
@@ -17,6 +21,7 @@ ontime-migrate = "ontime_sd.db:migrate_main"
 ontime-load-gtfs = "ontime_sd.gtfs_load:main"
 ontime-infer-arrivals = "ontime_sd.arrival_store:main"
 ontime-evaluate = "ontime_sd.evaluate:main"
+ontime-model = "ontime_sd.model:main"
 
 [dependency-groups]
 dev = [
