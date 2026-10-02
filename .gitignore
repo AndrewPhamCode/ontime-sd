@@ -25,5 +25,13 @@ logs/
 data/
 feeds/
 
+# Frontend
+node_modules/
+web/dist/
+web/.vite/
+
+# Browser automation output
+.playwright-mcp/
+
 # macOS
 .DS_Store
