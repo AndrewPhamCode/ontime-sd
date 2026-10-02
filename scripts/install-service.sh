@@ -55,7 +55,33 @@ for label in "${LABELS[@]}"; do
   # bootout first so reinstalling picks up changes. It fails when nothing is
   # loaded, which is fine.
   launchctl bootout "gui/$UID/$label" 2>/dev/null || true
-  launchctl bootstrap "gui/$UID" "$plist"
+
+  # bootout returns before launchd has finished unloading the job, and
+  # bootstrapping into that window fails with "5: Input/output error" and leaves
+  # the service down. That is worse than not reinstalling at all, so wait for
+  # the old job to actually disappear before loading the new one.
+  for _ in $(seq 1 50); do
+    launchctl print "gui/$UID/$label" >/dev/null 2>&1 || break
+    sleep 0.2
+  done
+
+  # Retry once anyway: the wait above closes the common race but launchd can
+  # still refuse transiently.
+  if ! launchctl bootstrap "gui/$UID" "$plist" 2>/dev/null; then
+    sleep 1
+    if ! launchctl bootstrap "gui/$UID" "$plist"; then
+      echo "error: could not load $label. It is NOT running." >&2
+      echo "       retry with: launchctl bootstrap gui/$UID $plist" >&2
+      exit 1
+    fi
+  fi
+
+  # Never report success without checking, since a silent failure here means
+  # collection has stopped.
+  if ! launchctl print "gui/$UID/$label" >/dev/null 2>&1; then
+    echo "error: $label bootstrapped but is not registered. It is NOT running." >&2
+    exit 1
+  fi
   echo "installed $label"
 done
 
