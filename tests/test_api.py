@@ -10,7 +10,7 @@ error.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import asyncpg
 import httpx
@@ -316,3 +316,167 @@ async def test_distribution_buckets_absolute_error(
     assert len(body) == 2
     assert {entry["source"] for entry in body} == {"mts", "lgbm"}
     assert all(entry["n"] == 1 for entry in body)
+
+
+# --- the ETA correction ------------------------------------------------------
+
+
+def test_the_most_specific_bias_with_enough_evidence_wins() -> None:
+    """Stop and route beats route alone when it has the samples to back it."""
+    from ontime_sd.api import BASIS_STOP_ROUTE, choose_bias
+
+    bias, basis, sample = choose_bias(91, -131.0, 2000, -40.0)
+    assert bias == -131.0
+    assert basis == BASIS_STOP_ROUTE
+    assert sample == 91
+
+
+def test_a_thin_stop_level_bias_falls_back_to_the_route() -> None:
+    """Correcting on three observations would be correcting on noise."""
+    from ontime_sd.api import BASIS_ROUTE, choose_bias
+
+    bias, basis, sample = choose_bias(3, -300.0, 2000, -40.0)
+    assert bias == -40.0
+    assert basis == BASIS_ROUTE
+    assert sample == 2000
+
+
+def test_no_evidence_means_no_correction_rather_than_a_guess() -> None:
+    """The app then shows MTS unchanged and says why."""
+    from ontime_sd.api import BASIS_NONE, choose_bias
+
+    bias, basis, sample = choose_bias(None, None, 4, -40.0)
+    assert bias is None
+    assert basis == BASIS_NONE
+    assert sample is None
+
+
+@pytest.mark.usefixtures("clean")
+async def test_upcoming_excludes_arrivals_already_in_the_past(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    await _seed(db_pool)
+    now = datetime.now(tz=UTC)
+    for offset, label in ((-10, "gone"), (10, "coming")):
+        await db_pool.execute(
+            """
+            insert into predictions (start_date, trip_id, stop_sequence, observed_at,
+                                     stop_id, route_id, arrival_time)
+            values ($1::date, $2::text, 3, now(), 'stop-A', 'route-9',
+                    $3::timestamptz)
+            """,
+            DAY_TEST,
+            f"trip-{label}",
+            now + timedelta(minutes=offset),
+        )
+
+    body = (await client.get("/api/stops/stop-A/upcoming")).json()
+    assert [a["trip_id"] for a in body["arrivals"]] == ["trip-coming"]
+
+
+@pytest.mark.usefixtures("clean")
+async def test_upcoming_applies_the_measured_bias(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    """MTS running early must push our estimate later, not earlier."""
+    await _seed(db_pool)
+    # _seed wrote 4 horizons of mts error at +120s, which is MTS predicting late.
+    # Add enough rows at the 10 minute horizon to clear the sample threshold.
+    for index in range(12):
+        await db_pool.execute(
+            """
+            insert into prediction_errors (
+                start_date, trip_id, stop_sequence, horizon_minutes, source,
+                feed_version, stop_id, route_id, arrived_at, predicted_arrival,
+                predicted_at, error_seconds, abs_error_seconds, ping_gap_seconds,
+                service_minute, is_weekend, has_all_horizons)
+            values ($1::date, $2::text, 3, 10, 'mts', $3::text, 'stop-A', 'route-9',
+                    $4::timestamptz, $4::timestamptz, $4::timestamptz - interval '10 min',
+                    -120, 120, 30, 720, false, true)
+            """,
+            DAY_TEST,
+            f"filler-{index}",
+            VERSION,
+            ARRIVED,
+        )
+
+    due = datetime.now(tz=UTC) + timedelta(minutes=9)
+    await db_pool.execute(
+        """
+        insert into predictions (start_date, trip_id, stop_sequence, observed_at,
+                                 stop_id, route_id, arrival_time)
+        values ($1::date, 'trip-live', 3, now(), 'stop-A', 'route-9', $2::timestamptz)
+        """,
+        DAY_TEST,
+        due,
+    )
+
+    body = (await client.get("/api/stops/stop-A/upcoming")).json()
+    arrival = body["arrivals"][0]
+
+    assert arrival["correction_basis"] in {"stop_and_route", "route"}
+    corrected = datetime.fromisoformat(arrival["corrected_arrival"])
+    # Bias is negative overall, so the corrected estimate must be later than MTS.
+    assert corrected > datetime.fromisoformat(arrival["mts_arrival"])
+
+
+@pytest.mark.usefixtures("clean")
+async def test_upcoming_without_history_returns_mts_unchanged(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    """A stop we have never measured must not get a fabricated correction."""
+    await _seed(db_pool)
+    await db_pool.execute("delete from prediction_errors")
+    await db_pool.execute(
+        """
+        insert into predictions (start_date, trip_id, stop_sequence, observed_at,
+                                 stop_id, route_id, arrival_time)
+        values ($1::date, 'trip-live', 3, now(), 'stop-A', 'route-9',
+                now() + interval '6 minutes')
+        """,
+        DAY_TEST,
+    )
+
+    body = (await client.get("/api/stops/stop-A/upcoming")).json()
+    arrival = body["arrivals"][0]
+    assert arrival["corrected_arrival"] is None
+    assert arrival["correction_basis"] == "none"
+
+
+@pytest.mark.usefixtures("clean")
+async def test_search_finds_stops_by_name(client: httpx.AsyncClient, db_pool: asyncpg.Pool) -> None:
+    """Regression: this route was being swallowed by /api/stops/{stop_id}, so
+    'search' was read as a stop id and the endpoint returned an empty stop."""
+    await _seed(db_pool)
+    body = (await client.get("/api/stops/search?q=Gilman")).json()
+
+    assert isinstance(body, list)
+    assert len(body) == 1
+    assert body[0]["stop_id"] == "stop-A"
+
+
+@pytest.mark.usefixtures("clean")
+async def test_search_needs_more_than_one_character(
+    client: httpx.AsyncClient,
+) -> None:
+    assert (await client.get("/api/stops/search?q=G")).status_code == 422
+
+
+@pytest.mark.usefixtures("clean")
+async def test_vehicles_carry_a_route_label_for_the_map(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    await _seed(db_pool)
+    await db_pool.execute(
+        "insert into routes (feed_version, route_id, route_short_name, route_type) "
+        "values ($1, 'route-9', '30', 3)",
+        VERSION,
+    )
+    await db_pool.execute(
+        "insert into vehicle_positions (vehicle_id, ts, route_id, lat, lon) "
+        "values ('bus-1', now(), 'route-9', 32.87, -117.24)"
+    )
+    body = (await client.get("/api/vehicles")).json()
+
+    assert body[0]["route_short_name"] == "30"
+    assert body[0]["route_type"] == 3

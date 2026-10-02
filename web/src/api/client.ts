@@ -19,6 +19,9 @@ export type ModelRun = Schemas['ModelRun'];
 export type Stop = Schemas['Stop'];
 export type StopDetail = Schemas['StopDetail'];
 export type Vehicle = Schemas['Vehicle'];
+export type StopUpcoming = Schemas['StopUpcoming'];
+export type UpcomingArrival = Schemas['UpcomingArrival'];
+export type StopSearchResult = Schemas['StopSearchResult'];
 
 export class ApiError extends Error {
   constructor(
@@ -50,4 +53,8 @@ export const api = {
   stopDetail: (stopId: string, horizon: number) =>
     get<StopDetail>(`/api/stops/${encodeURIComponent(stopId)}?horizon=${horizon}`),
   vehicles: () => get<Vehicle[]>('/api/vehicles'),
+  upcoming: (stopId: string) =>
+    get<StopUpcoming>(`/api/stops/${encodeURIComponent(stopId)}/upcoming`),
+  searchStops: (query: string) =>
+    get<StopSearchResult[]>(`/api/stops/search?q=${encodeURIComponent(query)}`),
 };
