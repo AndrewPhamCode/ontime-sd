@@ -55,6 +55,21 @@ infer-arrivals: ## Reconstruct arrivals from GPS for yesterday and today
 evaluate: ## Score MTS predictions against inferred arrivals
 	uv run ontime-evaluate --days 2
 
+api: ## Run the read-only API on :8000
+	uv run ontime-api
+
+ui: ## Run the web UI on :5174 (needs `make api` in another terminal)
+	cd web && npm run dev
+
+web-install: ## Install frontend dependencies
+	cd web && npm install
+
+web-check: ## Type check, lint, format check, test and build the frontend
+	cd web && npm run typecheck && npm run lint && npm run format:check && npm test && npx vite build
+
+web-types: ## Regenerate frontend API types from the running API
+	cd web && npm run gen:types
+
 model: ## Fit and score our predictors (train Sep 28-30, test Oct 1-2)
 	uv run ontime-model --train-from 2026-09-28 --train-to 2026-09-30 --test-from 2026-10-01 --test-to 2026-10-02
 
@@ -87,4 +102,5 @@ coverage: ## Show collection coverage and feed health from poll_log
 
 .PHONY: help install up down nuke migrate mock run test lint fmt psql health \
 	service-install service-uninstall service-status service-logs coverage \
-	load-gtfs load-gtfs-force schedule infer-arrivals arrivals evaluate baseline model compare
+	load-gtfs load-gtfs-force schedule infer-arrivals arrivals evaluate baseline model compare \
+	api ui web-install web-check web-types

@@ -12,6 +12,9 @@ dependencies = [
     "lightgbm>=4.5",
     "numpy>=2.0",
     "pandas>=2.2",
+    # Phase 6 API.
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
 ]
 
 [project.scripts]
@@ -22,6 +25,7 @@ ontime-load-gtfs = "ontime_sd.gtfs_load:main"
 ontime-infer-arrivals = "ontime_sd.arrival_store:main"
 ontime-evaluate = "ontime_sd.evaluate:main"
 ontime-model = "ontime_sd.model:main"
+ontime-api = "ontime_sd.api:main"
 
 [dependency-groups]
 dev = [
