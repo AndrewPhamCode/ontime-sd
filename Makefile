@@ -49,6 +49,12 @@ load-gtfs: ## Download and load the static GTFS schedule (skips if unchanged)
 load-gtfs-force: ## Reload the schedule even if unchanged or already loaded
 	uv run ontime-load-gtfs --force
 
+infer-arrivals: ## Reconstruct arrivals from GPS for yesterday and today
+	uv run ontime-infer-arrivals --days 2
+
+arrivals: ## Show inferred arrival counts and quality
+	docker compose exec -T postgres psql -U ontime -d ontime_sd -f /dev/stdin < scripts/arrivals.sql
+
 schedule: ## Show loaded GTFS feed versions and recent load attempts
 	docker compose exec -T postgres psql -U ontime -d ontime_sd -f /dev/stdin < scripts/schedule.sql
 
@@ -69,4 +75,4 @@ coverage: ## Show collection coverage and feed health from poll_log
 
 .PHONY: help install up down nuke migrate mock run test lint fmt psql health \
 	service-install service-uninstall service-status service-logs coverage \
-	load-gtfs load-gtfs-force schedule
+	load-gtfs load-gtfs-force schedule infer-arrivals arrivals
