@@ -182,13 +182,23 @@ class VehicleState:
         return f"MOCK_TRIP_{self.vehicle.vehicle_id}_{self.lap:04d}"
 
 
-# Trip update shapes. CLAUDE.md records an unverified assumption that the
-# OneBusAway feed may carry a single stop_time_update with a delay instead of
-# per stop arrival times. Rather than guess, the mock emits either shape so the
-# collector is tested against both before the real key arrives. See ADR-0019.
-PER_STOP = "per_stop"
-SINGLE_DELAY = "single_delay"
-TRIP_UPDATE_STYLES = (PER_STOP, SINGLE_DELAY)
+# Feed shapes.
+#
+# SHAPE_MTS mirrors what the real MTS feed actually sends, measured from
+# .pbtext the day the API key arrived. It is the default, because a mock that
+# emits fields the real feed omits gives false confidence: it hid the fact that
+# every prediction was being dropped for a missing stop_sequence, and it made
+# change-only storage look far more effective than it is. See ADR-0034.
+#
+# SHAPE_RICH populates every optional field, which keeps the parser's fallback
+# paths under test. A conforming GTFS-Realtime feed may send them even though
+# MTS does not.
+SHAPE_MTS = "mts"
+SHAPE_RICH = "rich"
+FEED_SHAPES = (SHAPE_MTS, SHAPE_RICH)
+
+# Fraction of stop_time_updates carrying a delay. The real feed had 30 of 7,750.
+_DELAY_FRACTION = 0.004
 
 
 @dataclass(slots=True)
@@ -275,8 +285,14 @@ class Simulator:
         message.header.timestamp = int(feed_timestamp.timestamp())
 
     def vehicle_positions(
-        self, now: datetime, feed_timestamp: datetime | None = None
+        self,
+        now: datetime,
+        feed_timestamp: datetime | None = None,
+        shape: str = SHAPE_MTS,
     ) -> gtfs_rt.FeedMessage:
+        if shape not in FEED_SHAPES:
+            raise ValueError(f"unknown shape {shape!r}, expected one of {FEED_SHAPES}")
+
         message = gtfs_rt.FeedMessage()
         self._header(message, feed_timestamp or now)
 
@@ -285,21 +301,29 @@ class Simulator:
             entity.id = f"vp-{state.vehicle.vehicle_id}"
 
             position = entity.vehicle
+            # Everything below this comment is what the real feed sends.
             position.trip.trip_id = state.trip_id
             position.trip.route_id = self.route.route_id
-            position.trip.start_date = now.astimezone(SERVICE_TZ).strftime("%Y%m%d")
             position.vehicle.id = state.vehicle.vehicle_id
             position.position.latitude = state.lat
             position.position.longitude = state.lon
-            position.position.bearing = state.bearing
-            position.position.speed = 0.0 if state.stopped else state.vehicle.speed_mps
-            position.current_stop_sequence = self.route.stops[state.next_stop_index].stop_sequence
-            position.current_status = (
-                gtfs_rt.VehiclePosition.STOPPED_AT
-                if state.stopped
-                else gtfs_rt.VehiclePosition.IN_TRANSIT_TO
-            )
             position.timestamp = int(now.timestamp())
+
+            if shape == SHAPE_RICH:
+                # None of these appear in the real MTS feed. Phase 3 therefore
+                # cannot rely on current_stop_sequence or current_status and has
+                # to snap GPS to the route shape instead.
+                position.trip.start_date = now.astimezone(SERVICE_TZ).strftime("%Y%m%d")
+                position.position.bearing = state.bearing
+                position.position.speed = 0.0 if state.stopped else state.vehicle.speed_mps
+                position.current_stop_sequence = self.route.stops[
+                    state.next_stop_index
+                ].stop_sequence
+                position.current_status = (
+                    gtfs_rt.VehiclePosition.STOPPED_AT
+                    if state.stopped
+                    else gtfs_rt.VehiclePosition.IN_TRANSIT_TO
+                )
 
         return message
 
@@ -307,10 +331,10 @@ class Simulator:
         self,
         now: datetime,
         feed_timestamp: datetime | None = None,
-        style: str = PER_STOP,
+        shape: str = SHAPE_MTS,
     ) -> gtfs_rt.FeedMessage:
-        if style not in TRIP_UPDATE_STYLES:
-            raise ValueError(f"unknown style {style!r}, expected one of {TRIP_UPDATE_STYLES}")
+        if shape not in FEED_SHAPES:
+            raise ValueError(f"unknown shape {shape!r}, expected one of {FEED_SHAPES}")
 
         message = gtfs_rt.FeedMessage()
         self._header(message, feed_timestamp or now)
@@ -322,32 +346,35 @@ class Simulator:
             update = entity.trip_update
             update.trip.trip_id = state.trip_id
             update.trip.route_id = self.route.route_id
-            update.trip.start_date = now.astimezone(SERVICE_TZ).strftime("%Y%m%d")
             update.vehicle.id = state.vehicle.vehicle_id
             update.timestamp = int(now.timestamp())
+
+            if shape == SHAPE_RICH:
+                update.trip.start_date = now.astimezone(SERVICE_TZ).strftime("%Y%m%d")
 
             upcoming = self.route.stops[
                 state.next_stop_index : state.next_stop_index + self.upcoming_stops
             ]
-            if style == SINGLE_DELAY:
-                # One entry, carrying only a delay, as OneBusAway may do.
-                stop = upcoming[0] if upcoming else self.route.stops[-1]
-                _, delay_s = self._predicted_arrival(state, stop, now)
-                stop_time = update.stop_time_update.add()
-                stop_time.stop_sequence = stop.stop_sequence
-                stop_time.stop_id = stop.stop_id
-                stop_time.arrival.delay = int(delay_s)
-                stop_time.schedule_relationship = gtfs_rt.TripUpdate.StopTimeUpdate.SCHEDULED
-                continue
-
             for stop in upcoming:
                 arrival, delay_s = self._predicted_arrival(state, stop, now)
                 stop_time = update.stop_time_update.add()
-                stop_time.stop_sequence = stop.stop_sequence
+
+                # The real feed identifies a stop by stop_id alone and sends
+                # absolute times. stop_sequence never appears, which is why it
+                # has to be recovered from the schedule. See ADR-0033.
                 stop_time.stop_id = stop.stop_id
                 stop_time.arrival.time = int(arrival.timestamp())
-                stop_time.arrival.delay = int(delay_s)
                 stop_time.departure.time = int(arrival.timestamp() + DWELL_SECONDS)
-                stop_time.schedule_relationship = gtfs_rt.TripUpdate.StopTimeUpdate.SCHEDULED
+
+                # Rare in the real feed: 30 of 7,750 stop time updates.
+                if _unit_noise("delay", state.trip_id, stop.stop_sequence) > (
+                    1.0 - 2.0 * _DELAY_FRACTION
+                ):
+                    stop_time.arrival.delay = int(delay_s)
+
+                if shape == SHAPE_RICH:
+                    stop_time.stop_sequence = stop.stop_sequence
+                    stop_time.arrival.delay = int(delay_s)
+                    stop_time.schedule_relationship = gtfs_rt.TripUpdate.StopTimeUpdate.SCHEDULED
 
         return message

@@ -146,12 +146,11 @@ class MockFeedServer:
         frozen = request.query.get("frozen") == "1"
         feed_ts = self.feed_timestamp(now, frozen=frozen)
 
+        shape = self.settings.mock_feed_shape
         if feed == VEHICLE_POSITIONS:
-            message = self.simulator.vehicle_positions(now, feed_timestamp=feed_ts)
+            message = self.simulator.vehicle_positions(now, feed_timestamp=feed_ts, shape=shape)
         else:
-            message = self.simulator.trip_updates(
-                now, feed_timestamp=feed_ts, style=self.settings.mock_trip_update_style
-            )
+            message = self.simulator.trip_updates(now, feed_timestamp=feed_ts, shape=shape)
 
         if as_text:
             body = text_format.MessageToString(message).encode()
@@ -181,7 +180,7 @@ class MockFeedServer:
             extra={
                 "port": actual,
                 "vehicles": self.simulator.vehicle_count,
-                "trip_update_style": self.settings.mock_trip_update_style,
+                "feed_shape": self.settings.mock_feed_shape,
                 "feed_refresh_seconds": self.settings.mock_feed_refresh_seconds,
             },
         )

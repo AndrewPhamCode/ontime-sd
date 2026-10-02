@@ -77,7 +77,7 @@ class Settings:
     mock_slow_seconds: float
     mock_truncate_rate: float
     mock_feed_refresh_seconds: int
-    mock_trip_update_style: str
+    mock_feed_shape: str
 
     @classmethod
     def from_env(cls, *, load_env_file: bool = True) -> Settings:
@@ -117,7 +117,7 @@ class Settings:
             mock_slow_seconds=_env_float("MOCK_SLOW_SECONDS", 5.0),
             mock_truncate_rate=_env_float("MOCK_TRUNCATE_RATE", 0.0),
             mock_feed_refresh_seconds=_env_int("MOCK_FEED_REFRESH_SECONDS", 30),
-            mock_trip_update_style=os.environ.get("MOCK_TRIP_UPDATE_STYLE", "per_stop").strip(),
+            mock_feed_shape=os.environ.get("MOCK_FEED_SHAPE", "mts").strip(),
         )
         settings.validate()
         return settings
@@ -140,8 +140,8 @@ class Settings:
                 raise ValueError(f"{name} must be between 0.0 and 1.0")
         if self.mock_feed_refresh_seconds <= 0:
             raise ValueError("MOCK_FEED_REFRESH_SECONDS must be positive")
-        if self.mock_trip_update_style not in ("per_stop", "single_delay"):
-            raise ValueError("MOCK_TRIP_UPDATE_STYLE must be per_stop or single_delay")
+        if self.mock_feed_shape not in ("mts", "rich"):
+            raise ValueError("MOCK_FEED_SHAPE must be mts or rich")
 
     @property
     def using_mock_feed(self) -> bool:

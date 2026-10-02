@@ -18,7 +18,7 @@ from ontime_sd.feeds import (
     header_timestamp,
     parse_message,
 )
-from ontime_sd.mock.simulator import PER_STOP, SINGLE_DELAY, Simulator
+from ontime_sd.mock.simulator import SHAPE_MTS, SHAPE_RICH, Simulator
 
 NOW = datetime(2026, 9, 27, 19, 0, tzinfo=UTC)
 NOW_EPOCH = int(NOW.timestamp())
@@ -49,12 +49,15 @@ def test_positions_extracted_from_the_mock_feed() -> None:
     assert row.trip_id
     assert row.start_date == NOW.astimezone().date() or isinstance(row.start_date, date)
     assert row.lat is not None and row.lon is not None
-    assert row.current_stop_sequence >= 1
+    # current_stop_sequence is absent in the default shape, because the real MTS
+    # feed never sends it. See test_mts_shape_omits_the_fields_the_real_feed_omits.
+    assert row.current_stop_sequence is None
 
 
-def test_predictions_extracted_from_per_stop_feed() -> None:
+def test_predictions_extracted_from_the_mts_shape() -> None:
+    """The real feed shape: stop_id and absolute times, no stop_sequence."""
     simulator = Simulator(vehicle_count=3)
-    parsed = extract_predictions(simulator.trip_updates(NOW, style=PER_STOP))
+    parsed = extract_predictions(simulator.trip_updates(NOW, shape=SHAPE_MTS))
 
     assert parsed.dropped == 0
     assert len(parsed.predictions) == 3 * simulator.upcoming_stops
@@ -62,21 +65,50 @@ def test_predictions_extracted_from_per_stop_feed() -> None:
     row = parsed.predictions[0]
     assert row.observed_at == NOW
     assert row.arrival_time is not None
-    assert row.delay_seconds is not None
-    assert row.stop_sequence >= 1
+    assert row.stop_id is not None
+    assert row.stop_sequence is None, "the real feed does not send this"
+    assert row.resolved is False
 
 
-def test_predictions_extracted_from_single_delay_feed() -> None:
-    """The shape CLAUDE.md flags as unverified must produce a usable row."""
+def test_predictions_extracted_from_the_rich_shape() -> None:
+    """A conforming feed may send everything, and the parser must use it."""
     simulator = Simulator(vehicle_count=3)
-    parsed = extract_predictions(simulator.trip_updates(NOW, style=SINGLE_DELAY))
+    parsed = extract_predictions(simulator.trip_updates(NOW, shape=SHAPE_RICH))
 
     assert parsed.dropped == 0
-    assert len(parsed.predictions) == 3
-
     row = parsed.predictions[0]
-    assert row.arrival_time is None, "single_delay carries no absolute time"
-    assert row.delay_seconds is not None, "the delay is the whole payload"
+    assert row.stop_sequence is not None
+    assert row.resolved is True
+    assert row.delay_seconds is not None
+    assert row.schedule_relationship is not None
+
+
+def test_mts_shape_omits_the_fields_the_real_feed_omits() -> None:
+    """Measured from the real feed: none of these are ever sent.
+
+    Phase 3 therefore cannot lean on current_stop_sequence or current_status and
+    must snap GPS to the route shape. See ADR-0034.
+    """
+    simulator = Simulator(vehicle_count=3)
+    row = extract_positions(simulator.vehicle_positions(NOW, shape=SHAPE_MTS)).positions[0]
+
+    assert row.bearing is None
+    assert row.speed is None
+    assert row.current_stop_sequence is None
+    assert row.current_status is None
+    assert row.occupancy_status is None
+    # Still present, because these are what the real feed does send.
+    assert row.vehicle_id and row.trip_id and row.route_id
+    assert row.lat is not None and row.lon is not None
+
+
+def test_rich_shape_populates_the_optional_fields() -> None:
+    simulator = Simulator(vehicle_count=3)
+    row = extract_positions(simulator.vehicle_positions(NOW, shape=SHAPE_RICH)).positions[0]
+
+    assert row.bearing is not None
+    assert row.current_stop_sequence is not None
+    assert row.current_status is not None
 
 
 # --- header timestamp ---

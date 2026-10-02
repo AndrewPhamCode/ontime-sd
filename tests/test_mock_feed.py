@@ -20,7 +20,7 @@ from google.protobuf import text_format
 from google.transit import gtfs_realtime_pb2 as gtfs_rt
 
 from ontime_sd.mock.server import MockFeedServer, _parse_path
-from ontime_sd.mock.simulator import PER_STOP, SINGLE_DELAY, Simulator
+from ontime_sd.mock.simulator import SHAPE_MTS, SHAPE_RICH, Simulator
 from tests.conftest import make_settings
 
 VEHICLE_COUNT = 6
@@ -94,8 +94,10 @@ async def test_vehicle_positions_are_valid_protobuf(
     # Inside the San Diego area, so anything plotted on a map is plausible.
     assert 32.0 < position.position.latitude < 33.5
     assert -118.0 < position.position.longitude < -116.5
-    assert 0.0 <= position.position.bearing <= 360.0
-    assert position.current_stop_sequence >= 1
+    # The real feed sends neither of these, so the default shape must not
+    # either. See ADR-0034.
+    assert not position.HasField("current_stop_sequence")
+    assert not position.position.HasField("bearing")
 
 
 async def test_trip_updates_carry_per_stop_predictions(
@@ -132,11 +134,13 @@ async def test_pbtext_is_human_readable_and_parses_back(
     assert len(reparsed.entity) == VEHICLE_COUNT
 
 
-async def test_single_delay_style_emits_one_update_without_a_time() -> None:
-    """The shape CLAUDE.md flags as an unverified possibility. See ADR-0019."""
-    server = MockFeedServer(
-        make_settings(mock_vehicle_count=3, mock_trip_update_style=SINGLE_DELAY)
-    )
+async def test_default_shape_omits_stop_sequence_like_the_real_feed() -> None:
+    """The real MTS feed never sends stop_sequence. The mock must not either.
+
+    When it did, every prediction was dropped against the real feed while tests
+    stayed green. See ADR-0034.
+    """
+    server = MockFeedServer(make_settings(mock_vehicle_count=3))
     port = await server.start(0)
     try:
         async with httpx.AsyncClient(timeout=10) as c:
@@ -144,17 +148,34 @@ async def test_single_delay_style_emits_one_update_without_a_time() -> None:
         message = _parse(response.content)
 
         update = message.entity[0].trip_update
-        assert len(update.stop_time_update) == 1
-        stop_time = update.stop_time_update[0]
-        assert not stop_time.arrival.HasField("time")
-        assert stop_time.arrival.HasField("delay")
+        assert len(update.stop_time_update) > 1, "per stop, not a single delay"
+        for stop_time in update.stop_time_update:
+            assert not stop_time.HasField("stop_sequence")
+            assert stop_time.stop_id
+            assert stop_time.arrival.HasField("time")
+        assert not update.trip.HasField("start_date")
     finally:
         await server.stop()
 
 
-def test_simulator_rejects_an_unknown_style() -> None:
-    with pytest.raises(ValueError, match="unknown style"):
-        Simulator(vehicle_count=2).trip_updates(datetime.now(tz=UTC), style="vibes")
+async def test_rich_shape_populates_everything_optional() -> None:
+    """Keeps the parser's fallback paths under test."""
+    server = MockFeedServer(make_settings(mock_vehicle_count=3, mock_feed_shape=SHAPE_RICH))
+    port = await server.start(0)
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            response = await c.get(f"{server.base_url(port)}/trip-updates-for-agency/MTS.pb")
+        update = _parse(response.content).entity[0].trip_update
+
+        assert update.stop_time_update[0].HasField("stop_sequence")
+        assert update.trip.HasField("start_date")
+    finally:
+        await server.stop()
+
+
+def test_simulator_rejects_an_unknown_shape() -> None:
+    with pytest.raises(ValueError, match="unknown shape"):
+        Simulator(vehicle_count=2).trip_updates(datetime.now(tz=UTC), shape="vibes")
 
 
 # --- movement and determinism ---
@@ -199,9 +220,9 @@ def test_predictions_drift_enough_to_exercise_change_only_storage() -> None:
     start = datetime(2026, 9, 27, 19, 0, tzinfo=UTC)
 
     def arrivals(at: datetime) -> dict[tuple[str, int], int]:
-        message = simulator.trip_updates(at, style=PER_STOP)
+        message = simulator.trip_updates(at, shape=SHAPE_MTS)
         return {
-            (entity.trip_update.trip.trip_id, stu.stop_sequence): stu.arrival.time
+            (entity.trip_update.trip.trip_id, stu.stop_id): stu.arrival.time
             for entity in message.entity
             for stu in entity.trip_update.stop_time_update
         }

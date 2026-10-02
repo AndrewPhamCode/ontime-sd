@@ -1103,3 +1103,56 @@ after each schedule reload, since a fresher schedule may agree more closely.
 The alignment also assumes the feed's stop list is a subsequence of the scheduled
 list. A genuinely re-routed trip breaks that assumption, and the 13 out of order
 cases are most likely exactly that.
+
+---
+
+## ADR-0034: The mock defaults to the shape the real feed actually sends
+
+**Status:** Accepted
+
+**Decision.** `MOCK_FEED_SHAPE` selects the mock's output. The default, `mts`,
+emits only what the real MTS feed was measured to send. `rich` populates every
+optional field, keeping the parser's fallback paths under test. The `single_delay`
+style is deleted.
+
+**Why.** The mock was more generous than reality, and that cost real damage twice.
+
+It emitted `stop_sequence` on every `stop_time_update`. The real feed never sends
+it. So the collector passed every test while dropping 100% of real predictions,
+and `poll_log` showed healthy `ok` polls throughout. The failure was invisible
+until the parser was run against the real feed by hand.
+
+It also modelled prediction drift on a 120 second cycle, which made change-only
+storage look about 99% effective. Measured against the real feed it is about 78%,
+which is the difference between the "thousands of rows per day" claimed in
+ADR-0005 and the roughly 3.3 million per day actually observed.
+
+Both mistakes share one cause: a mock written from the specification rather than
+from the feed, used as evidence about the feed. The default now mirrors
+measurement. Specifically absent in `mts` shape, because the real feed omits them:
+`stop_sequence`, `start_date`, `schedule_relationship`, `bearing`, `speed`,
+`current_stop_sequence`, `current_status`, and `occupancy_status`. `delay` appears
+on about 0.4% of stop time updates, matching the 30 of 7,750 observed.
+
+**Rejected.** Replacing the output with the real shape only, deleting the richer
+variant. Simpler and more honest about MTS, but it drops coverage of the parser's
+optional field handling, which a conforming feed may exercise and which already
+contains real fallback logic. Keeping both, with the realistic one as the default,
+costs one branch.
+
+Also rejected: leaving the mock alone now that the real feed is available. The mock
+is what runs in CI, where no API key exists, so it remains the thing most tests
+actually exercise.
+
+**Consequences.** Predictions from the default shape now require a loaded schedule
+to resolve, exactly as in production. Three collector tests that assert predictions
+land therefore use `rich`, because the simulator's synthetic trip ids do not appear
+in any GTFS fixture. The resolution path itself is tested against a real loaded
+schedule in `tests/test_trip_stops.py`.
+
+**Known gap.** The mock describes a world the GTFS fixture does not: its route,
+trips, and stops share no identifiers with the static fixture, so the full
+realtime-plus-schedule pipeline cannot be exercised end to end offline. The fix is
+for the simulator to emit a matching static GTFS archive from its own route. That
+is worth doing before Phase 4, since Phase 4 joins the two together and would
+otherwise be testable only against live data.
