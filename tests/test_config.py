@@ -76,7 +76,7 @@ def test_unknown_feed_is_rejected() -> None:
         ({"mock_failure_rate": 1.5}, "MOCK_FAILURE_RATE"),
         ({"mock_truncate_rate": -0.1}, "MOCK_TRUNCATE_RATE"),
         ({"mock_feed_refresh_seconds": 0}, "MOCK_FEED_REFRESH_SECONDS"),
-        ({"mock_trip_update_style": "guessing"}, "MOCK_TRIP_UPDATE_STYLE"),
+        ({"mock_feed_shape": "guessing"}, "MOCK_FEED_SHAPE"),
     ],
 )
 def test_invalid_settings_are_rejected_at_startup(overrides: dict[str, object], match: str) -> None:

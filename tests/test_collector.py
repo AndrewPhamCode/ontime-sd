@@ -29,6 +29,15 @@ pytestmark = pytest.mark.usefixtures("clean_tables")
 # which is how the unchanged-header skip path is reached deterministically.
 FROZEN_HEADER = 86_400
 
+# Tests that need predictions to land use the rich feed shape, which includes
+# stop_sequence. The default shape mirrors the real MTS feed and omits it, so
+# those predictions require a loaded schedule to resolve against (ADR-0033), and
+# the simulator's synthetic trip ids do not appear in any GTFS fixture. The
+# resolution path itself is covered against a real loaded schedule in
+# tests/test_trip_stops.py. Known gap, recorded in ADR-0034: the mock does not
+# yet emit a static feed matching its own route.
+RESOLVABLE = {"mock_feed_shape": "rich"}
+
 
 @pytest_asyncio.fixture(loop_scope="session")
 async def clean_tables(db_pool: asyncpg.Pool) -> AsyncIterator[None]:
@@ -96,7 +105,7 @@ async def test_position_poll_writes_rows_and_logs_the_poll(
 async def test_trip_update_poll_writes_predictions(
     db_pool: asyncpg.Pool, http_client: object
 ) -> None:
-    async with running_mock(mock_vehicle_count=4) as (_, settings):
+    async with running_mock(mock_vehicle_count=4, **RESOLVABLE) as (_, settings):
         poller = _poller(TRIP_UPDATES, settings, db_pool, http_client)
         outcome = await poller.poll_once()
 
@@ -188,7 +197,7 @@ async def test_second_prediction_poll_writes_far_fewer_rows(
     Two polls seconds apart see nearly identical predictions, so the second must
     write dramatically fewer rows than it was offered.
     """
-    async with running_mock(mock_vehicle_count=10) as (_, settings):
+    async with running_mock(mock_vehicle_count=10, **RESOLVABLE) as (_, settings):
         poller = _poller(TRIP_UPDATES, settings, db_pool, http_client)
 
         first = await poller.poll_once()
@@ -321,7 +330,10 @@ async def test_poll_log_failure_does_not_raise(db_pool: asyncpg.Pool) -> None:
 async def test_run_starts_both_feeds_and_stops_cleanly(
     db_pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async with running_mock(mock_vehicle_count=3, poll_interval_seconds=1) as (_, settings):
+    async with running_mock(mock_vehicle_count=3, poll_interval_seconds=1, **RESOLVABLE) as (
+        _,
+        settings,
+    ):
         monkeypatch.setattr(
             "ontime_sd.collector.create_pool", lambda _settings, **_kw: _wrap(db_pool)
         )

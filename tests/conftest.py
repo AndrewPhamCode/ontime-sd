@@ -72,7 +72,7 @@ def make_settings(**overrides: object) -> Settings:
         "mock_slow_seconds": 5.0,
         "mock_truncate_rate": 0.0,
         "mock_feed_refresh_seconds": 30,
-        "mock_trip_update_style": "per_stop",
+        "mock_feed_shape": "mts",
     }
     base.update(overrides)
     return Settings(**base)  # type: ignore[arg-type]
