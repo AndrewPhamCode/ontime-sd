@@ -1493,3 +1493,100 @@ rows drawn from only three of those days. The pipeline reruns with
 which is the real deliverable here rather than today's figure. `model_runs` records
 the window, features and parameters behind every run so a quoted number is
 traceable. There is still no weekend data, so the weekday split remains uncomputable.
+
+## ADR-0039: Viewer settings, and the cache key invariant they exposed
+
+**Status:** Accepted
+
+**Decision.** The constants that governed every figure are exposed to the viewer
+in two groups. The prediction group carries the decisions this project argues
+about: which horizon's measured bias drives the live correction, how many
+observed arrivals are required before correcting at all, which arrivals count as
+well observed, and which predictor sits beside MTS. The map group is
+presentation only and changes no number.
+
+Settings live in the viewer's browser, not on the server. They are a property of
+who is looking, not of the deployment, and a server-side store would mean one
+visitor's experiment changed what the next visitor saw.
+
+Defaults are exactly the constants the API applies when no parameter is sent, so
+a fresh viewer, a reset viewer, and the figures quoted in the README and in
+ADR-0038 all agree.
+
+### The bug this uncovered, which is the real content of this record
+
+Three endpoints cached their aggregates under keys containing none of their
+parameters:
+
+```
+cache.get("headline", ...)    cache.get("bias", ...)    cache.get("quality", ...)
+```
+
+With no parameters, that was correct. The moment any of them took a setting it
+became a silent lie: changing the setting returned the *previous* setting's
+numbers for up to the sixty second TTL, with nothing on screen to indicate it.
+The failure is invisible by construction, because a plausible number appears and
+the page looks like it responded.
+
+This was confirmed rather than assumed. With the bare key restored, a request at
+a 15 minute label filter returns the 3 minute filter's body verbatim, including
+its `label_filter_seconds: 180` field, which is the tell.
+
+**The invariant:** every cache key contains every parameter that changes the
+result. A test asserts two different parameter values never share an entry, and
+it fails if a key is ever shortened again.
+
+**At scale.** The cache is per process and not shared between workers, so a
+second API process would simply hold its own copy. The keys are low cardinality
+because every parameter is drawn from a fixed choice list, which is also why the
+choice lists are validated rather than free numeric input: an unbounded
+`max_ping_gap` would let a visitor mint unbounded cache entries.
+
+### An unknown predictor is rejected, not silently empty
+
+`compare` is validated against the four known sources and refused with a 422.
+Returning an empty column instead would read on screen as "the model has no data
+here", which is a very different claim from "you asked for a predictor that does
+not exist".
+
+### Honesty markers
+
+Exposing these knobs is only defensible if the page says when one has been moved
+somewhere flattering. Two settings can improve the numbers while meaning less:
+
+- **loosening the label filter** admits arrivals whose true time is barely known,
+  which charges this project's own GPS interpolation error to every predictor,
+  including MTS
+- **lowering the minimum sample** fits a correction to a handful of observations
+
+Either one raises a caution in the settings panel, on the evidence page and in
+the stop arrivals panel, naming the specific reason. Any change at all shows a
+banner and marks the settings control, so a screenshot of a configured app
+cannot be mistaken for a screenshot of the project's actual result.
+
+The point of exposing these is to let someone interrogate the result, not to let
+the result be configured into looking good.
+
+### Rejected alternatives
+
+- **Leaving the constants hardcoded.** Simplest, and the honest figures were
+  already published. Rejected because the interesting question about this project
+  is how sensitive the result is to those choices, and the only convincing answer
+  is to let someone move them and watch.
+- **Server-side settings.** Rejected above: per viewer, not per deployment.
+- **A shorter cache TTL instead of keyed entries.** Rejected because it narrows
+  the window in which the page lies rather than closing it, and the lie is silent.
+- **Free numeric inputs instead of choice lists.** Rejected for cache cardinality
+  and because the offered values are the ones that mean something.
+- **Two horizon controls**, one in settings and the evidence page's own selector.
+  Rejected as two controls for one concept, which would diverge; the page now
+  reads its horizon from settings and links to the panel.
+
+### Verified
+
+Against the live database rather than by inspection. Tightening the label filter
+from 15 to 3 minutes moves MTS from 1.87 to 1.77 minutes MAE as the sample falls
+from 79,188 to 50,591, because it stops scoring arrivals this project only knows
+roughly. Raising the minimum sample to 2000 takes every correction to `none`.
+At a one minute horizon the corrections shrink to a few seconds, which is the
+expected shape: short horizons are easy, so there is little bias to correct.

@@ -49,18 +49,6 @@ export function formatCount(n: number | null | undefined): string {
   return n.toLocaleString('en-US');
 }
 
-export function formatClock(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const parsed = new Date(iso);
-  if (Number.isNaN(parsed.getTime())) return '—';
-  return parsed.toLocaleTimeString('en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
-}
-
 export interface HeadlineRow {
   source: string;
   horizon_minutes: number;

@@ -10,6 +10,7 @@ import {
 } from 'recharts';
 import { api, type DistributionBucket } from '../api/client';
 import { SOURCE_COLORS, SOURCE_LABELS, formatCount } from '../lib/format';
+import { useParams } from '../settings/useParams';
 import { useApi } from '../lib/useApi';
 import { Card, Empty, Failed, Pending } from './Card';
 
@@ -23,10 +24,12 @@ interface Row {
  *
  *  Only two series, ours against MTS. Putting all four on a ten-bucket histogram
  *  would be unreadable, and the baselines are already compared above. */
-export function ErrorDistribution({ horizon }: { horizon: number }) {
+export function ErrorDistribution() {
+  const params = useParams();
+  const horizon = params.horizon;
   const { data, error, loading } = useApi<DistributionBucket[]>(
-    () => api.distribution(horizon),
-    [horizon],
+    () => api.distribution(params),
+    [params],
   );
 
   if (loading)

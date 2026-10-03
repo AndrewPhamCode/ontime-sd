@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { api, type RouteComparison } from '../api/client';
 import { formatCount, formatMinutes, formatSignedMinutes } from '../lib/format';
+import { useParams } from '../settings/useParams';
 import { useApi } from '../lib/useApi';
 import { Card, Empty, Failed, Pending } from './Card';
 
@@ -8,11 +9,13 @@ type SortKey = 'mts' | 'ours' | 'delta' | 'n';
 
 /** Per route, where we gain and where we lose. A table rather than a chart:
  *  the job here is identity and lookup across many rows, which a chart does badly. */
-export function RouteTable({ horizon }: { horizon: number }) {
+export function RouteTable() {
+  const params = useParams();
+  const horizon = params.horizon;
   const [sort, setSort] = useState<SortKey>('mts');
   const { data, error, loading } = useApi<RouteComparison[]>(
-    () => api.routes(horizon),
-    [horizon],
+    () => api.routes(params),
+    [params],
   );
 
   if (loading)

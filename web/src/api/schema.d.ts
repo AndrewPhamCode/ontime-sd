@@ -612,7 +612,10 @@ export interface operations {
     };
     headline_api_headline_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Widest GPS gap behind an arrival that still counts */
+                max_ping_gap?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -628,6 +631,15 @@ export interface operations {
                     "application/json": components["schemas"]["Headline"];
                 };
             };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
     routes_api_routes_get: {
@@ -637,6 +649,9 @@ export interface operations {
                 horizon?: number;
                 /** @description Minimum pairs for a route to appear */
                 min_n?: number;
+                max_ping_gap?: number;
+                /** @description Predictor to compare MTS against */
+                compare?: string;
             };
             header?: never;
             path?: never;
@@ -669,6 +684,7 @@ export interface operations {
             query?: {
                 /** @description Horizon in minutes */
                 horizon?: number;
+                max_ping_gap?: number;
             };
             header?: never;
             path?: never;
@@ -698,7 +714,10 @@ export interface operations {
     };
     data_quality_api_data_quality_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description The label quality filter the caller is applying elsewhere */
+                max_ping_gap?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -712,6 +731,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DataQuality"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -807,6 +835,8 @@ export interface operations {
                 /** @description Horizon in minutes */
                 horizon?: number;
                 limit?: number;
+                /** @description Predictor to compare MTS against */
+                compare?: string;
             };
             header?: never;
             path: {
@@ -841,6 +871,10 @@ export interface operations {
             query?: {
                 /** @description How many services to return */
                 limit?: number;
+                /** @description Which horizon's measured bias drives the correction */
+                horizon?: number;
+                /** @description Arrivals required before a stop-and-route bias is used */
+                min_sample?: number;
             };
             header?: never;
             path: {

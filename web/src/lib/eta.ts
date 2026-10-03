@@ -23,10 +23,11 @@ export function formatWait(iso: string, now: Date = new Date()): string {
 }
 
 /** Clock time, for the secondary line under the countdown. */
-export function formatArrivalClock(iso: string): string {
+export function formatArrivalClock(iso: string, hour12 = true): string {
   return new Date(iso).toLocaleTimeString('en-US', {
-    hour: 'numeric',
+    hour: hour12 ? 'numeric' : '2-digit',
     minute: '2-digit',
+    hour12,
   });
 }
 

@@ -1,5 +1,6 @@
 import { api, type DataQuality as DataQualityData } from '../api/client';
 import { coverageStatus, formatCount } from '../lib/format';
+import { useParams } from '../settings/useParams';
 import { useApi } from '../lib/useApi';
 import { Card, Failed, Pending } from './Card';
 
@@ -18,7 +19,11 @@ const STATUS_ICON = { good: '●', warning: '▲', critical: '■' } as const;
  *  evidence sits behind each inferred arrival. Both bound what any number on this
  *  page can mean, so both are stated. */
 export function DataQuality() {
-  const { data, error, loading } = useApi<DataQualityData>(() => api.dataQuality());
+  const params = useParams();
+  const { data, error, loading } = useApi<DataQualityData>(
+    () => api.dataQuality(params),
+    [params],
+  );
 
   if (loading)
     return (

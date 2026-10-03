@@ -3,19 +3,24 @@ import { api, type Stop, type StopSearchResult } from '../api/client';
 import { useApi } from '../lib/useApi';
 import { useVehicles } from '../lib/useVehicles';
 import { MapView, PLACES, type MapPlace } from '../map/MapView';
+import { useSettings } from '../settings/SettingsContext';
+import { PLACE_KEYS } from '../settings/settings';
 import { StopArrivals } from '../panels/StopArrivals';
 import { StopSearch } from '../panels/StopSearch';
 
 /** The app. Map first, arrivals beside it on desktop and underneath on a phone. */
 export function MapApp({ onShowEvidence }: { onShowEvidence: () => void }) {
-  const [place, setPlace] = useState<MapPlace>(PLACES['ucsd']!);
+  const { settings, set } = useSettings();
+  // The place buttons and the settings default are the same control, so the map
+  // opens where the setting says and the buttons move the setting.
+  const place: MapPlace = PLACES[settings.place] ?? PLACES['ucsd']!;
   const [flyTo, setFlyTo] = useState<{ center: [number, number]; zoom: number } | null>(
     null,
   );
   const [selected, setSelected] = useState<string | null>(null);
 
   const stops = useApi<Stop[]>(() => api.stops());
-  const vehicles = useVehicles(10_000);
+  const vehicles = useVehicles(settings.showVehicles ? settings.refreshMs : 0);
 
   const onSelect = useCallback((stopId: string) => setSelected(stopId), []);
   const onPick = useCallback((stop: StopSearchResult) => {
@@ -33,16 +38,18 @@ export function MapApp({ onShowEvidence }: { onShowEvidence: () => void }) {
           onSelect={onSelect}
           place={place}
           flyTo={flyTo}
+          showVehicles={settings.showVehicles}
+          showStopLabels={settings.showStopLabels}
         />
 
         <div className="map-overlay">
           <StopSearch onPick={onPick} />
           <div className="place-buttons">
-            {(['ucsd', 'downtown', 'all'] as const).map((key) => (
+            {PLACE_KEYS.map((key) => (
               <button
                 key={key}
                 className="toggle"
-                onClick={() => setPlace(PLACES[key]!)}
+                onClick={() => set('place', key)}
                 style={{
                   fontWeight: place.label === PLACES[key]!.label ? 600 : 400,
                   borderColor:
@@ -68,7 +75,10 @@ export function MapApp({ onShowEvidence }: { onShowEvidence: () => void }) {
             <i className="dot trolley" /> trolley
           </span>
           <span className="muted">
-            {vehicles.vehicles.length} vehicles live
+            {settings.showVehicles
+              ? `${vehicles.vehicles.length} vehicles live`
+              : 'vehicles hidden'}
+            {settings.refreshMs === 0 && settings.showVehicles ? ' · not refreshing' : ''}
             {vehicles.error ? ' · feed unavailable' : ''}
           </span>
         </div>

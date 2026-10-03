@@ -7,6 +7,9 @@ import {
   formatWait,
   isTrolley,
 } from '../lib/eta';
+import { useSettings } from '../settings/SettingsContext';
+import { useParams } from '../settings/useParams';
+import { weakenedBy } from '../settings/settings';
 
 /** Live arrivals at a stop: what MTS says, and what we think it really means.
  *
@@ -25,6 +28,9 @@ export function StopArrivals({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [tick, setTick] = useState(0);
+  const params = useParams();
+  const { settings } = useSettings();
+  const thin = weakenedBy(settings);
 
   // Re-render every 15s so the countdowns stay honest between fetches.
   useEffect(() => {
@@ -41,7 +47,7 @@ export function StopArrivals({
     setLoading(true);
     const load = () =>
       api
-        .upcoming(stopId)
+        .upcoming(stopId, params)
         .then((result) => {
           if (active) {
             setData(result);
@@ -61,7 +67,7 @@ export function StopArrivals({
       active = false;
       clearInterval(timer);
     };
-  }, [stopId]);
+  }, [stopId, params]);
 
   if (!stopId) {
     return (
@@ -88,6 +94,12 @@ export function StopArrivals({
         <h2>{data.stop_name ?? data.stop_id}</h2>
         <p className="sheet-sub">Stop {data.stop_id}</p>
       </header>
+
+      {thin.length > 0 ? (
+        <p className="settings-warn" role="status">
+          Corrections below are weaker than the default: {thin.join('; ')}.
+        </p>
+      ) : null}
 
       {data.arrivals.length === 0 ? (
         <p className="sheet-empty">
@@ -127,13 +139,16 @@ export function StopArrivals({
                     MTS says {formatWait(arrival.mts_arrival, now)}
                     <span className="clock">
                       {' '}
-                      ({formatArrivalClock(arrival.mts_arrival)})
+                      ({formatArrivalClock(arrival.mts_arrival, !settings.clock24)})
                     </span>
                   </span>
                   {corrected ? (
                     <span className="ours">
                       ours {formatWait(corrected, now)}
-                      <span className="clock"> ({formatArrivalClock(corrected)})</span>
+                      <span className="clock">
+                        {' '}
+                        ({formatArrivalClock(corrected, !settings.clock24)})
+                      </span>
                     </span>
                   ) : (
                     <span className="ours muted">no correction, not enough history</span>

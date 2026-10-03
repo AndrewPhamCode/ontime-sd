@@ -717,3 +717,236 @@ body,
 .maplibregl-popup-tip {
   display: none;
 }
+
+/* ---------- Settings ---------------------------------------------------- */
+
+.settings-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(11, 11, 11, 0.42);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.settings-panel {
+  width: min(460px, 100%);
+  height: 100%;
+  overflow-y: auto;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  padding: 18px 22px 28px;
+  box-shadow: -18px 0 46px rgba(11, 11, 11, 0.18);
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 4px 0 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-head h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.settings-head-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.settings-group {
+  padding: 18px 0 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-group:last-of-type {
+  border-bottom: 0;
+}
+
+.settings-group h3 {
+  margin: 0 0 4px;
+  font-size: 0.82rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-secondary);
+}
+
+.settings-blurb {
+  margin: 0 0 14px;
+  font-size: 0.84rem;
+  line-height: 1.45;
+  color: var(--ink-muted);
+}
+
+.settings-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 0;
+}
+
+.settings-row + .settings-row {
+  border-top: 1px dashed var(--border);
+}
+
+.settings-row-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.settings-row-text label {
+  display: block;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.settings-cost {
+  margin: 3px 0 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--ink-muted);
+}
+
+.settings-control {
+  flex: 0 0 auto;
+}
+
+.settings-control select {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 6px 8px;
+  color: var(--ink);
+  background: var(--plane);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.settings-changed {
+  margin-left: 7px;
+  padding: 1px 6px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--surface);
+  background: var(--series-persist);
+  border-radius: 999px;
+  vertical-align: 1px;
+}
+
+/* A weakened measurement is called out in the same colour as a warning status,
+   never left to the reader to infer from the controls. */
+.settings-warn {
+  margin: 14px 0 2px;
+  padding: 9px 11px;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--status-warning) 16%, var(--surface));
+  border-left: 3px solid var(--status-warning);
+  border-radius: 6px;
+}
+
+.settings-foot {
+  margin: 18px 0 0;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--ink-muted);
+}
+
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 5px 10px 5px 6px;
+  color: var(--ink);
+  background: var(--plane);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.switch-knob {
+  width: 26px;
+  height: 15px;
+  border-radius: 999px;
+  background: var(--axis);
+  position: relative;
+  transition: background 120ms ease;
+}
+
+.switch-knob::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--surface);
+  transition: transform 120ms ease;
+}
+
+.switch.on .switch-knob {
+  background: var(--status-good);
+}
+
+.switch.on .switch-knob::after {
+  transform: translateX(11px);
+}
+
+.toggle.modified {
+  border-color: var(--series-persist);
+}
+
+.modified-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--series-persist);
+  vertical-align: 1px;
+}
+
+.modified-banner {
+  padding: 8px 16px;
+  font-size: 0.82rem;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--status-warning) 16%, var(--surface));
+  border-bottom: 1px solid var(--border);
+}
+
+.linklike {
+  font: inherit;
+  padding: 0;
+  color: var(--series-lgbm);
+  background: none;
+  border: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+@media (max-width: 620px) {
+  .settings-panel {
+    width: 100%;
+    padding: 14px 16px 24px;
+  }
+
+  .settings-row {
+    flex-direction: column;
+    gap: 8px;
+  }
+}

@@ -5,14 +5,24 @@ import { Headline } from '../panels/Headline';
 import { HorizonChart } from '../panels/HorizonChart';
 import { MethodNote } from '../panels/MethodNote';
 import { RouteTable } from '../panels/RouteTable';
-import { HORIZONS } from '../lib/format';
-import { useState } from 'react';
+import { api, type DataQuality as DataQualityData } from '../api/client';
+import { formatCount } from '../lib/format';
+import { useApi } from '../lib/useApi';
+import { useSettings } from '../settings/SettingsContext';
+import { useParams } from '../settings/useParams';
+import { weakenedBy } from '../settings/settings';
 
 /** The evidence behind the corrections the map shows. Unchanged from the
  *  dashboard it was before; riders get the map, anyone judging the work gets
  *  this. */
-export function Analysis() {
-  const [horizon, setHorizon] = useState<number>(10);
+export function Analysis({ onOpenSettings }: { onOpenSettings: () => void }) {
+  const params = useParams();
+  const { settings } = useSettings();
+  const weakened = weakenedBy(settings);
+  // The arrival count is read from the API rather than written into the copy,
+  // because it grows every day the collector runs and changes with the label
+  // filter. A hardcoded figure would be wrong by tomorrow.
+  const quality = useApi<DataQualityData>(() => api.dataQuality(params), [params]);
 
   return (
     <div className="page">
@@ -22,9 +32,22 @@ export function Analysis() {
           <p className="subtitle">
             Every corrected estimate on the map comes from measuring MTS against what
             actually happened. This is that measurement: the agency's own predictions scored
-            on 613,615 arrivals reconstructed from raw GPS, with a model beside them. The
-            honest result is parity, not a win.
+            on {quality.data ? formatCount(quality.data.arrivals_total) : 'all'} arrivals
+            reconstructed from raw GPS, with a model beside them. The honest result is
+            parity, not a win.
           </p>
+          <p className="subtitle">
+            Showing the {settings.horizon} minute horizon.{' '}
+            <button className="linklike" onClick={onOpenSettings}>
+              Change the horizon, the evidence threshold or the predictor
+            </button>
+            .
+          </p>
+          {weakened.length > 0 ? (
+            <p className="settings-warn" role="status">
+              These are not the project's headline figures: {weakened.join('; ')}.
+            </p>
+          ) : null}
         </div>
       </div>
 
@@ -32,23 +55,8 @@ export function Analysis() {
       <HorizonChart />
       <DeltaPanel />
 
-      <div className="controls" style={{ marginTop: 20 }}>
-        <label htmlFor="horizon">Lead time for the panels below</label>
-        <select
-          id="horizon"
-          value={horizon}
-          onChange={(event) => setHorizon(Number(event.target.value))}
-        >
-          {HORIZONS.map((value) => (
-            <option key={value} value={value}>
-              {value} minutes ahead
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <ErrorDistribution horizon={horizon} />
-      <RouteTable horizon={horizon} />
+      <ErrorDistribution />
+      <RouteTable />
       <DataQuality />
       <MethodNote />
     </div>
