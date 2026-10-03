@@ -1667,3 +1667,102 @@ and replay on reconnect, which would have saved the nine hours outright.
 beyond curl and osascript, and costs nothing. Its state file holds three fields
 so that notifications fire on transitions rather than on every run, which is the
 difference between an alert and a nuisance that gets muted.
+
+## ADR-0041: The collector moves to AWS, with Postgres on the same box
+
+**Status:** Accepted
+
+**Context.** ADR-0040 raised the laptop's collection ceiling but could not reach
+it. Closing the lid sleeps the machine and no user space assertion overrides
+that, so coverage stays bounded by how often the laptop is open and docked.
+Measured coverage over the first five service days was 35 to 67%. The model needs
+weeks of continuous history, and the headline metric is computed over whatever
+was collected, so coverage is the binding constraint on the whole project rather
+than an operational inconvenience.
+
+**Decision.** One `t4g.small` EC2 instance in `us-west-2`, running the collector
+under systemd and Postgres in Docker on the same host, provisioned by Terraform
+in `infra/`.
+
+### Postgres on the instance rather than RDS
+
+RDS is the production shape and gives automated backups and point in time
+recovery for free. It was rejected for this project at this size:
+
+- It is roughly 50% more per month, about $29 against $23, for a database with
+  one writer and no availability requirement beyond "do not lose the data".
+- The collector writes continuously and would pay a network hop per write
+  instead of talking to localhost.
+- The backup story is replaceable: a DLM policy takes daily snapshots of the
+  data volume and keeps seven, which is the recovery objective this project
+  actually has.
+
+This is a defensible trade rather than the obviously correct one, and the thing
+to be able to say about it is what would change the answer: a second writer, a
+real availability requirement, or anyone else depending on the data.
+
+### The data volume is separate from the instance
+
+The database lives on its own encrypted EBS volume with `prevent_destroy`, not on
+the root volume. The instance is disposable, and `user_data_replace_on_change`
+means editing the bootstrap rebuilds it. The data is not disposable, because it
+cannot be recollected. Keeping those two on separate volumes is what makes
+"rebuild the box" a safe operation.
+
+### The API key never enters Terraform state
+
+The SSM parameter is created by hand and read through a data source rather than
+managed as a resource. A `aws_ssm_parameter` resource would put the secret in
+plaintext into `terraform.tfstate`, which is a file on the laptop and would then
+have to be treated as a secret itself. The instance reads it at boot through its
+IAM role, and the bootstrap script turns off shell tracing around the only line
+that holds it.
+
+### Alerting moves off the host
+
+The local watchdog from ADR-0040 is not copied across. A watchdog running on the
+host it watches cannot report that the host is gone. Instead a systemd timer
+publishes seconds since the last successful poll to CloudWatch every minute, and
+the alarm lives in CloudWatch where it survives the instance. Missing data is
+treated as breaching rather than unknown, because a metric that stops arriving is
+exactly what a dead collector looks like.
+
+### Both collectors run during the cutover
+
+The migration script merges rather than restores. Stopping the laptop first would
+leave a gap, and a gap is permanent, so the cloud collector starts on an empty
+database and the laptop's history is merged in underneath it afterwards. Every
+table moved has a natural primary key, so the merge is `on conflict do nothing`
+and is safe to run more than once.
+
+Only the irreplaceable tables move: `feed_versions`, `poll_log`,
+`vehicle_positions` and `predictions`. `prediction_errors`, `arrivals` and
+`segment_stats` are recomputed on the far side, and the static GTFS tables are
+re-downloaded, which avoids shipping 1.6 GB that can be regenerated.
+
+**Rejected alternatives.**
+
+- **A cheap VPS**, Hetzner or DigitalOcean, at a third of the price. Rejected
+  because the charter specifies AWS with infrastructure as code, and for a
+  portfolio project the deployment target is part of the artifact.
+- **ECS or Fargate.** Rejected as the wrong shape: this is one long lived process
+  with a local database, not a scalable service, and the container orchestration
+  would be ceremony around a single task.
+- **Keeping the laptop as a second collector after cutover.** Rejected because
+  two writers to two databases produce two partial histories, and the merge only
+  makes sense as a one time operation.
+- **A NAT gateway and a private subnet.** Rejected on cost: a NAT gateway alone
+  costs more per month than the entire rest of this stack, to protect one host
+  whose only inbound rule is SSH from a single address.
+
+**What this does not solve.** The API and the map are still local. Nothing here
+deploys them, and the map is the thing a visitor actually sees, so Phase 7 is not
+finished by this record. Retention is also unaddressed: 100 GB is four to five
+months of runway at full coverage, and the alarm on the volume is a warning
+rather than a plan.
+
+**At scale.** Full coverage roughly triples the daily write volume relative to
+the laptop's measured 35 to 67%, which is the point. Growth is about 0.55 GB a
+day of raw capture. The first thing to break is disk, and the first mitigation is
+a rollup of `vehicle_positions` older than the training window, since the model
+reads segment aggregates rather than individual pings.

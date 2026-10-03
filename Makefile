@@ -129,10 +129,30 @@ service-status: ## Show whether the launchd agents are running
 service-logs: ## Follow the collector log (gtfs.log for the loader)
 	tail -f "$$HOME/Library/Logs/ontime-sd/collector.log"
 
+infra-init: ## Initialise Terraform in infra/
+	terraform -chdir=infra init
+
+infra-plan: ## Show what would be created in AWS (reads infra/terraform.tfvars)
+	terraform -chdir=infra plan
+
+infra-apply: ## Create or update the AWS collector host. Costs money.
+	terraform -chdir=infra apply
+
+infra-destroy: ## Tear the AWS stack down. The data volume is protected and survives.
+	terraform -chdir=infra destroy
+
+infra-output: ## Show the host address, SSH command and cost estimate
+	@terraform -chdir=infra output
+
+migrate-to-aws: ## Copy collected history from this laptop to the cloud host
+	@test -n "$(HOST)" || { echo "usage: make migrate-to-aws HOST=ec2-user@<ip>"; exit 2; }
+	bash scripts/migrate-to-aws.sh "$(HOST)"
+
 coverage: ## Show collection coverage and feed health from poll_log
 	docker compose exec -T postgres psql -U ontime -d ontime_sd -f /dev/stdin < scripts/coverage.sql
 
 .PHONY: help install up down nuke migrate mock run test lint fmt psql health \
 	service-install service-uninstall service-status service-logs coverage \
 	load-gtfs load-gtfs-force schedule infer-arrivals arrivals evaluate baseline model compare \
-	api ui web-install web-check web-types
+	api ui web-install web-check web-types \
+	infra-init infra-plan infra-apply infra-destroy infra-output migrate-to-aws

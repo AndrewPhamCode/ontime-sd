@@ -275,6 +275,105 @@ it should never sleep:
 Check it with `pmset -g custom`. Battery is left alone deliberately, since the
 laptop is not a server when it is unplugged.
 
+## Deploying the collector to AWS
+
+The laptop cannot be a 24/7 collector: closing the lid sleeps it and no user
+space assertion overrides that. The Terraform stack in `infra/` moves collection
+to an always on host. Roughly $23 to $26 a month on demand.
+
+### One time, before the first apply
+
+The AWS profile is required with no default, because this machine holds
+credentials for an unrelated project and a default would make deploying into the
+wrong account a single forgotten flag.
+
+    aws configure --profile ontime          # or: aws login
+    aws sts get-caller-identity --profile ontime
+
+The API key goes into SSM by hand, not through Terraform, so it never enters the
+state file:
+
+    aws ssm put-parameter --profile ontime --region us-west-2 \
+      --name /ontime-sd/mts-api-key --type SecureString \
+      --value "$(grep '^MTS_API_KEY=' .env | cut -d= -f2-)"
+
+Then a key to reach the box with, and the variables:
+
+    ssh-keygen -t ed25519 -f ~/.ssh/ontime-sd -C ontime-sd
+    cp infra/terraform.tfvars.example infra/terraform.tfvars
+    # fill in ssh_cidr (curl -s https://checkip.amazonaws.com), ssh_public_key, alarm_email
+
+### Apply
+
+    make infra-init
+    make infra-plan          # read it; this is the step that starts costing money
+    make infra-apply
+    make infra-output        # address, SSH command, cost estimate
+
+First boot takes a few minutes: it formats the data volume, installs Docker and
+uv, clones the repo, reads the key from SSM, runs the migrations and starts the
+systemd units. Watch it:
+
+    ssh ec2-user@<ip> 'sudo tail -f /var/log/cloud-init-output.log'
+    ssh ec2-user@<ip> 'systemctl status ontime-collector'
+
+### Move the history across
+
+Both collectors run during this, deliberately: stopping the laptop first would
+leave a gap, and realtime data cannot be backfilled. The script restores into a
+staging database and merges with `on conflict do nothing`, so an overlap is
+harmless and the script is safe to run twice.
+
+    make migrate-to-aws HOST=ec2-user@<ip>
+
+Then rebuild the derived tables on the host, which were deliberately not shipped:
+
+    ssh ec2-user@<ip> 'cd /opt/ontime-sd && make arrivals && make compare'
+
+Once the cloud database looks right, stop the laptop agents so collection is not
+split across two machines:
+
+    make service-uninstall
+
+### What runs where afterwards
+
+| Thing | Laptop | Cloud |
+| --- | --- | --- |
+| Collector | removed | `ontime-collector.service`, `Restart=always` |
+| Weekly GTFS refresh | removed | `ontime-gtfs.timer`, Sundays 03:30 |
+| Staleness alerting | removed | CloudWatch alarm, via a per minute metric |
+| Postgres | can stay for local work | the system of record |
+| API and map | still local | not deployed yet |
+
+### Reaching the cloud database
+
+Postgres listens on localhost only and the security group has no 5432 rule.
+Open a tunnel instead:
+
+    ssh -N -L 5434:localhost:5433 ec2-user@<ip>
+    psql postgresql://ontime:ontime@localhost:5434/ontime_sd
+
+### When the alarm fires
+
+`ontime-sd-collection-stale` means no successful poll for ten minutes. Missing
+data is treated as breaching, so it also fires when the metric stops arriving at
+all, which is what a dead host looks like.
+
+    ssh ec2-user@<ip> 'systemctl status ontime-collector; tail -50 /var/log/ontime-sd/collector.err.log'
+    ssh ec2-user@<ip> 'docker ps; df -h /var/lib/ontime-sd'
+
+A full data volume is the slow failure this design has. `make coverage` on the
+host shows what was lost. The volume can be grown in place:
+raise `data_volume_gb`, apply, then `sudo resize2fs /dev/nvme1n1`.
+
+### Tearing it down
+
+    make infra-destroy
+
+The data volume carries `prevent_destroy`, so it survives and Terraform refuses
+to delete it. That is deliberate: it holds the only copy of data that cannot be
+recollected. Removing it is a conscious act, after a snapshot.
+
 ## Known limitations
 
 - Running on a laptop means sleep gaps. Closing the lid sleeps the machine and

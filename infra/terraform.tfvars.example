@@ -1,0 +1,25 @@
+# Copy to terraform.tfvars and fill in. That file is gitignored.
+
+# The profile to deploy with. There is no default: this machine has credentials
+# for an unrelated project, and a default makes deploying into the wrong account
+# a one-flag mistake.
+aws_profile = "ontime"
+
+# Your own address, so the instance is not reachable by the whole internet.
+#   curl -s https://checkip.amazonaws.com
+ssh_cidr = "203.0.113.4/32"
+
+# Public half of the key you will SSH with.
+#   ssh-keygen -t ed25519 -f ~/.ssh/ontime-sd -C ontime-sd
+#   cat ~/.ssh/ontime-sd.pub
+ssh_public_key = "ssh-ed25519 AAAA... ontime-sd"
+
+# Where the staleness alarm goes. Leave empty to create the topic without a
+# subscription and wire it up later.
+alarm_email = "you@example.com"
+
+# Defaults worth knowing about, uncomment to change:
+# region         = "us-west-2"
+# instance_type  = "t4g.small"
+# data_volume_gb = 100
+# repo_ref       = "main"

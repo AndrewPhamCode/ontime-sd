@@ -35,3 +35,14 @@ web/.vite/
 
 # macOS
 .DS_Store
+
+# Terraform. State holds resource attributes and must never be committed; the
+# tfvars file holds the SSH key and the operator's address.
+infra/.terraform/
+infra/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+tfplan
