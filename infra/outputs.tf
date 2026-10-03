@@ -26,7 +26,7 @@ output "monthly_cost_estimate" {
   value = join(" ", [
     "~$23-26/mo on-demand:",
     "${var.instance_type} ~$12.26,",
-    "${var.data_volume_gb} GB data gp3 ~$${var.data_volume_gb * 0.08},",
+    format("%d GB data gp3 ~$%.2f,", var.data_volume_gb, var.data_volume_gb * 0.08),
     "30 GB root gp3 ~$2.40,",
     "7 daily snapshots a few dollars,",
     "EIP free while attached.",

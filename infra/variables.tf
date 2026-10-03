@@ -79,3 +79,13 @@ variable "repo_ref" {
   type        = string
   default     = "main"
 }
+
+variable "monthly_budget_usd" {
+  description = <<-EOT
+    Spend threshold for the budget alarm. The stack costs roughly $25, so the
+    default leaves room for a snapshot or two without crying wolf, while still
+    catching anything genuinely unintended.
+  EOT
+  type        = string
+  default     = "45"
+}
