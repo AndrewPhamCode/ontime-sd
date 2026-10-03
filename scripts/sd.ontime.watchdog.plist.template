@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>sd.ontime.watchdog</string>
+
+  <!-- Notices when collection has stopped and says so. Not a restarter:
+       launchd already restarts the collector. This exists because the outage
+       that actually happened was silent, and realtime data cannot be
+       backfilled, so an unnoticed outage is permanent loss. See ADR-0040. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__PROJECT_DIR__/scripts/watchdog.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT_DIR__</string>
+
+  <!-- Every five minutes, matching the collector's own staleness threshold.
+       Checking faster would only report the same outage sooner than the
+       collector itself considers a feed stale. -->
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <!-- Deliberately not KeepAlive: this is a check that finishes, and it exits
+       non-zero when collection is down, which KeepAlive would treat as a crash
+       to restart in a tight loop. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/watchdog.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/watchdog.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__PATH__</string>
+  </dict>
+</dict>
+</plist>

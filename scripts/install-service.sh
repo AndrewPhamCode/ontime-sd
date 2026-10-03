@@ -2,15 +2,17 @@
 # Install the launchd agents:
 #   sd.ontime.collector  realtime collection, runs continuously (ADR-0015)
 #   sd.ontime.gtfs       static schedule refresh, weekly (ADR-0031)
+#   sd.ontime.watchdog   notices when collection has stopped (ADR-0040)
 #
-# They are separate agents because the collector must never stop and the loader
-# is a weekly job that finishes.
+# They are separate agents because they have different lifetimes: the collector
+# must never stop, the loader is a weekly job that finishes, and the watchdog is
+# a periodic check.
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="$HOME/Library/Logs/ontime-sd"
 AGENTS_DIR="$HOME/Library/LaunchAgents"
-LABELS=(sd.ontime.collector sd.ontime.gtfs)
+LABELS=(sd.ontime.collector sd.ontime.gtfs sd.ontime.watchdog)
 
 UV="$(command -v uv || true)"
 if [[ -z "$UV" ]]; then
@@ -91,15 +93,21 @@ cat <<NOTES
 
   logs: $LOG_DIR/collector.log
         $LOG_DIR/gtfs.log
+        $LOG_DIR/watchdog.log
 
-Both agents need Postgres reachable. With the compose setup that means Docker
-Desktop must be running, and set to start at login. The collector currently
-exits if the database is unreachable at startup and launchd restarts it every
-30 seconds until it is; feed outages after startup are handled by backoff
-instead.
+The collector and the loader need Postgres reachable. With the compose setup
+that means Docker Desktop must be running and set to start at login, which is
+what its AutoStart setting controls. The collector exits if the database is
+unreachable at startup and launchd restarts it every 30 seconds until it is;
+feed outages after startup are handled by backoff instead.
 
 The schedule loader runs Sundays at 03:30. It is idempotent, so running it by
 hand at any time is safe:  make load-gtfs
+
+The watchdog checks /healthz every five minutes and posts a notification when
+collection stops or recovers. It does not restart anything; launchd already
+does that. It is there so an outage is noticed, because realtime data cannot
+be backfilled.
 
 Check them:   make service-status
 Follow logs:  make service-logs

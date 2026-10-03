@@ -1590,3 +1590,80 @@ from 79,188 to 50,591, because it stops scoring arrivals this project only knows
 roughly. Raising the minimum sample to 2000 takes every correction to `none`.
 At a one minute horizon the corrections shrink to a few seconds, which is the
 expected shape: short horizons are easy, so there is little bias to correct.
+
+## ADR-0040: A watchdog, because the outage that happened was silent
+
+**Status:** Accepted
+
+**Context.** Collection stopped for nine hours and nothing reported it. Docker
+Desktop was not running, so Postgres was unreachable, so the collector exited at
+startup and launchd restarted it every thirty seconds into the same failure,
+writing 2.5 MB of identical tracebacks to stderr. The supervision worked exactly
+as designed. The problem was that the design had no way to say "I have been
+failing since 21:50".
+
+This matters more here than in most systems, because the input is a live feed.
+A web service that is down for nine hours serves errors and then recovers; a
+collector that is down for nine hours loses nine hours of data that no retry can
+ever recover.
+
+**Decision.** Three changes, in increasing order of how much they actually fix.
+
+1. **Docker Desktop `AutoStart` set to `true`.** It was `false`, and Docker was
+   not a login item, so the database never returned after a reboot. With the
+   container's existing `restart: unless-stopped`, the whole chain now recovers
+   unattended: Docker starts at login, Postgres starts with it, and the
+   collector's `KeepAlive` reconnects. This is the direct fix for the outage that
+   occurred.
+
+2. **A watchdog agent**, `sd.ontime.watchdog`, running every five minutes. It
+   probes `/healthz` and posts a macOS notification when collection stops and
+   again when it recovers.
+
+   It deliberately does **not** restart anything. launchd already restarts the
+   collector, and a second thing restarting it would race with the first. Its
+   only job is to convert a silent failure into a visible one.
+
+   It alerts only after two consecutive failed probes. A single failure is not an
+   outage: the collector is restarted on reinstall and on crash, and `/healthz`
+   is briefly unanswered each time. This was not theoretical, the first version
+   fired a false alarm against its own installation. Two probes at a five minute
+   interval means roughly ten minutes down before anyone is told, which is well
+   inside the tolerance for a feed that publishes every thirty seconds.
+
+3. **System sleep on AC.** The machine slept after one minute idle on AC as well
+   as battery. The collector holds a `caffeinate` assertion for its lifetime
+   (ADR-0015), but only for its lifetime, so a database outage drops the
+   assertion, the machine sleeps a minute later, and nothing retries until
+   someone opens the lid. A failure that puts the machine to sleep is a failure
+   that cannot self heal. This requires `sudo pmset -c sleep 0` and is left to
+   the operator rather than changed by the project.
+
+**Rejected alternatives.**
+
+- **Making the watchdog restart things.** Rejected above: it would race launchd,
+  and auto remediation that papers over a fault makes the fault harder to see.
+  The one exception considered was starting Docker when the engine is down, which
+  `AutoStart` now covers more reliably and at the right moment.
+- **Email or push alerts.** Rejected for now as infrastructure the project does
+  not otherwise need. A local notification is enough on the machine the collector
+  runs on, and Phase 7 replaces this with CloudWatch alarms once collection moves
+  off the laptop.
+- **Having the collector retry instead of exiting when the database is
+  unreachable.** Tempting, and it would have kept the process alive and the
+  `caffeinate` assertion with it. Rejected because launchd's restart is the
+  simpler supervisor and the exit is honest; the real problem was not the exit
+  but that nobody was told. Worth revisiting if the spool-to-disk idea below is
+  ever built.
+
+**What this does not fix.** Closing the lid still sleeps the machine, and no
+user space assertion can override it. A laptop that travels cannot be a 24/7
+collector, so these changes raise the ceiling rather than reach it. The real fix
+is Phase 7: move collection to an always on host. A complementary idea, not
+built, is to have the collector spool to local disk when Postgres is unreachable
+and replay on reconnect, which would have saved the nine hours outright.
+
+**At scale.** The watchdog is a five minute shell probe with no dependencies
+beyond curl and osascript, and costs nothing. Its state file holds three fields
+so that notifications fire on transitions rather than on every run, which is the
+difference between an alert and a nuisance that gets muted.
