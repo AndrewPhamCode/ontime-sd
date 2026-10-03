@@ -26,10 +26,15 @@ output "monthly_cost_estimate" {
   value = join(" ", [
     "~$23-26/mo on-demand:",
     "${var.instance_type} ~$12.26,",
-    "${var.data_volume_gb} GB data gp3 ~$${var.data_volume_gb * 0.08},",
+    format("%d GB data gp3 ~$%.2f,", var.data_volume_gb, var.data_volume_gb * 0.08),
     "30 GB root gp3 ~$2.40,",
     "7 daily snapshots a few dollars,",
     "EIP free while attached.",
     "A 1 year Savings Plan takes roughly 30% off the instance."
   ])
+}
+
+output "instance_id" {
+  description = "For Session Manager, which needs no SSH key and no security group rule."
+  value       = aws_instance.collector.id
 }

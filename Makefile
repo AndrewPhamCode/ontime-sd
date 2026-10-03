@@ -144,6 +144,16 @@ infra-destroy: ## Tear the AWS stack down. The data volume is protected and surv
 infra-output: ## Show the host address, SSH command and cost estimate
 	@terraform -chdir=infra output
 
+infra-allow-me: ## Point the SSH rule at your current public address and apply
+	@ip=$$(curl -s https://checkip.amazonaws.com); \
+	  echo "updating ssh_cidr to $$ip/32"; \
+	  sed -i '' "s|^ssh_cidr = .*|ssh_cidr = \"$$ip/32\"|" infra/terraform.tfvars
+	terraform -chdir=infra apply -auto-approve
+
+ssh-aws: ## Shell on the collector host via Session Manager, no SSH or IP rule needed
+	aws ssm start-session --profile ontime --region us-west-2 \
+	  --target $$(terraform -chdir=infra output -raw instance_id)
+
 migrate-to-aws: ## Copy collected history from this laptop to the cloud host
 	@test -n "$(HOST)" || { echo "usage: make migrate-to-aws HOST=ec2-user@<ip>"; exit 2; }
 	bash scripts/migrate-to-aws.sh "$(HOST)"
@@ -155,4 +165,5 @@ coverage: ## Show collection coverage and feed health from poll_log
 	service-install service-uninstall service-status service-logs coverage \
 	load-gtfs load-gtfs-force schedule infer-arrivals arrivals evaluate baseline model compare \
 	api ui web-install web-check web-types \
-	infra-init infra-plan infra-apply infra-destroy infra-output migrate-to-aws
+	infra-init infra-plan infra-apply infra-destroy infra-output migrate-to-aws \
+	infra-allow-me ssh-aws

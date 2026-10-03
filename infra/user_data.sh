@@ -57,7 +57,20 @@ umask 077
 cat > "$APP_DIR/.env" <<ENVFILE
 MTS_API_KEY=$${API_KEY}
 DATABASE_URL=postgresql://ontime:ontime@localhost:5433/ontime_sd
+
+# The real feed. Without this the collector falls back to the mock server on
+# localhost:8081, which is the right default for a laptop before the key
+# arrives and exactly the wrong one here. It polled the mock for ten minutes on
+# the first deploy because this line was missing.
+MTS_FEED_BASE_URL=https://realtime.sdmts.com/api/api/gtfs_realtime
+
+POLL_INTERVAL_SECONDS=30
+PREDICTION_CHANGE_THRESHOLD_SECONDS=30
+BACKOFF_BASE_SECONDS=1
+BACKOFF_MAX_SECONDS=300
 HEALTH_PORT=8080
+HEALTH_STALE_AFTER_SECONDS=300
+LOG_LEVEL=INFO
 ENVFILE
 unset API_KEY
 set -x
