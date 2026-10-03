@@ -239,10 +239,48 @@ Never commit the key. It belongs only in `.env`, which is gitignored.
 - Sub 30 second prediction revisions being discarded. That is the intended lossy
   compression, per ADR-0017.
 
+## Collection stopped and nobody noticed
+
+This happened: Docker Desktop was not running, Postgres was unreachable, the
+collector crash looped for nine hours, and no part of the system said anything.
+Realtime feed data cannot be backfilled, so an outage nobody notices is
+permanent data loss. Three things now cover it.
+
+**Docker Desktop starts at login.** Its `AutoStart` setting was `false`, which
+meant that after any reboot the database never came back. It is now `true`, and
+the Postgres container carries `restart: unless-stopped`, so the whole chain
+recovers on its own: Docker starts, Postgres starts, and launchd's `KeepAlive`
+has the collector reconnect.
+
+**The watchdog agent** (`sd.ontime.watchdog`) checks `/healthz` every five
+minutes and posts a macOS notification when collection stops, and again when it
+recovers. It does not restart anything, because launchd already does. It alerts
+only after two consecutive failed probes, so a restart blip is not an outage.
+
+    log:    ~/Library/Logs/ontime-sd/watchdog.log
+    state:  ~/Library/Logs/ontime-sd/watchdog.state   (ok|down, last notify, consecutive failures)
+    by hand: bash scripts/watchdog.sh ; echo $?        (0 healthy, 1 down)
+
+If it is alerting and you want to know why, `make health` shows the collector's
+own view and `make coverage` shows what was lost.
+
+**System sleep.** The machine was set to sleep after one minute idle, on AC as
+well as battery. That interacts badly with a crash loop: the collector holds a
+`caffeinate` assertion only while it is alive, so a database outage drops the
+assertion, the machine sleeps, and nothing retries until someone wakes it. On AC
+it should never sleep:
+
+    sudo pmset -c sleep 0
+
+Check it with `pmset -g custom`. Battery is left alone deliberately, since the
+laptop is not a server when it is unplugged.
+
 ## Known limitations
 
-- Running on a laptop means sleep gaps. Accepted for now, measurable in
-  `poll_log`, and the reason to move to an always on host.
+- Running on a laptop means sleep gaps. Closing the lid sleeps the machine and
+  no user space assertion can prevent that, so coverage is bounded by how often
+  the laptop is open and docked. Measurable in `poll_log`, and the reason Phase 7
+  moves collection to an always on host.
 - The prediction cache is process local and starts cold, so each restart causes
   one burst of redundant writes.
 - A service day is inferred from the observation time when the feed omits
