@@ -33,3 +33,8 @@ output "monthly_cost_estimate" {
     "A 1 year Savings Plan takes roughly 30% off the instance."
   ])
 }
+
+output "instance_id" {
+  description = "For Session Manager, which needs no SSH key and no security group rule."
+  value       = aws_instance.collector.id
+}

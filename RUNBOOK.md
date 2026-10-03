@@ -345,6 +345,27 @@ split across two machines:
 | Postgres | can stay for local work | the system of record |
 | API and map | still local | not deployed yet |
 
+### Getting a shell on the host
+
+Session Manager is the primary path, because it needs no SSH key, no open port
+and no security group rule, and it keeps working when a home address rotates:
+
+    make ssh-aws
+
+SSH still works when the security group matches where you are. Home addresses
+rotate, sometimes within minutes, so when SSH times out that is the first thing
+to check:
+
+    curl -s https://checkip.amazonaws.com     # compare with the rule
+    make infra-allow-me                       # point the rule at where you are now
+
+Running a command without a shell at all, which is how the first deploy was
+repaired:
+
+    aws ssm send-command --profile ontime --region us-west-2 \
+      --instance-ids <id> --document-name AWS-RunShellScript \
+      --parameters 'commands=["systemctl status ontime-collector"]'
+
 ### Reaching the cloud database
 
 Postgres listens on localhost only and the security group has no 5432 rule.
