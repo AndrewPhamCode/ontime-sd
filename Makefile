@@ -5,6 +5,35 @@ SHELL := /bin/bash
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
+# Refuse to start a server on a port something else already owns.
+#
+# Without this, `make api` fails with a bare "address already in use" traceback
+# and `make ui` silently moves to the next free port, so the UI then talks to an
+# API that is not the one being edited. Both wasted real time during Phase 6.
+# The check names the process holding the port, because the usual cause is an
+# earlier run of this same target still in the background.
+define check_port
+	@if lsof -nP -iTCP:$(1) -sTCP:LISTEN >/dev/null 2>&1; then \
+		echo "Port $(1) is already in use by:"; \
+		lsof -nP -iTCP:$(1) -sTCP:LISTEN | tail -n +2 | awk '{printf "  %s (pid %s)\n", $$1, $$2}'; \
+		echo "Stop it first, or run: kill $$(lsof -ti tcp:$(1) -sTCP:LISTEN | tr '\n' ' ')"; \
+		exit 1; \
+	fi
+endef
+
+# Refuse to start something that needs the database when it is not reachable.
+#
+# Postgres being down is usually Docker Desktop not running, and the failure
+# without this check is a forty line asyncpg traceback ending in ECONNREFUSED,
+# which buries the one sentence that matters.
+define check_db
+	@if ! nc -z localhost $${PGPORT:-5433} >/dev/null 2>&1; then \
+		echo "Postgres is not reachable on localhost:$${PGPORT:-5433}."; \
+		echo "Start it with: make up    (needs Docker Desktop running)"; \
+		exit 1; \
+	fi
+endef
+
 install: ## Sync the virtualenv from pyproject.toml
 	uv sync
 
@@ -56,9 +85,12 @@ evaluate: ## Score MTS predictions against inferred arrivals
 	uv run ontime-evaluate --days 2
 
 api: ## Run the read-only API on :8000
+	$(call check_port,8000)
+	$(call check_db)
 	uv run ontime-api
 
 ui: ## Run the web UI on :5174 (needs `make api` in another terminal)
+	$(call check_port,5174)
 	cd web && npm run dev
 
 web-install: ## Install frontend dependencies
