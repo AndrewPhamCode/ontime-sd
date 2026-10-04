@@ -1962,3 +1962,97 @@ learned correction, and it beats the baseline (2.10 against 1.66 at ten minutes)
 because the correction is worth having, not because it found structure of its own.
 Closing the remaining gap at twenty minutes needs the live position the agency has
 and this model is denied, not more features derived from stop arrivals.
+
+## ADR-0046: Time of day bands that partition the service day
+
+**Status:** Accepted
+
+**Decision.** Six bands, filtered on `prediction_errors.service_minute`, reaching
+`/api/headline`, `/api/routes` and `/api/error-distribution` as a `time_band`
+parameter. The charter asks for error broken down by time of day and the column
+already exists, so this is a filter rather than new data.
+
+The bands are **exhaustive and non-overlapping**, and a test asserts it across
+every service minute from 0 to 1739. Measured at the 10 minute horizon:
+
+| Band | n | MTS | Ours |
+| --- | --- | --- | --- |
+| All day | 50,591 | 1.77 | 1.66 |
+| AM rush, 6 to 9 | 20,340 | 1.55 | 1.46 |
+| Midday, 9 to 15 | 12,744 | 1.96 | 1.78 |
+| PM rush, 15 to 19 | 6,844 | 2.19 | 2.15 |
+| Evening, 19 to 24 | 5,357 | 1.63 | 1.61 |
+| Late, 24 to 6 | 5,306 | 1.74 | 1.54 |
+
+The five bands sum to exactly 50,591. That property is the reason the band list is
+not simply "morning, afternoon, evening": a visitor who sees bands that do not add
+up to the total has a concrete reason to distrust every other figure on the page,
+and partitioning is cheap to guarantee and cheap to test.
+
+`late` is the awkward band and the reason the property needs checking rather than
+assuming. GTFS times run past 24:00:00 for trips that cross midnight, so service
+minute 1500 is 01:00 the next calendar day and belongs with the small hours. It is
+the one band expressed as a wraparound rather than a range.
+
+**An unknown band is a 422**, not a fall back to all day, for the same reason
+`validate_source` rejects an unknown predictor: showing the unfiltered number
+under a band's label is a wrong answer presented confidently, which is worse than
+an error.
+
+**Every cache key carries the band**, per the ADR-0039 invariant, with a test that
+two bands do not share an entry.
+
+**Not treated as a weakening.** `weakenedBy` flags settings that admit worse data,
+such as a looser label filter. A band admits no worse data, it selects a subset, so
+it produces no caution. It does count as *modified*, so the app bar marks a
+filtered view and a screenshot of PM rush cannot be mistaken for the headline
+result.
+
+**What it revealed.** PM rush is the hardest slice for both predictors, 2.19 and
+2.15 against an all-day 1.77 and 1.66, and it is where the model's edge nearly
+vanishes. The edge is widest at midday and late night. An all-day average hid
+both facts.
+
+## ADR-0047: The migration reported success while moving nothing
+
+**Status:** Accepted
+
+`scripts/migrate-to-aws.sh` sent its remote half over stdin:
+
+```
+ssh "$HOST" bash -se <<REMOTE
+C() { sudo -n docker exec -i ontime-sd-postgres "$@"; }
+C psql -U ontime -d postgres -c "drop database if exists ..."
+```
+
+`docker exec -i` inherits stdin, and stdin was the script itself. The first psql
+call consumed the remainder, bash ran out of input and exited 0, and the script
+printed its own completion banner having copied nothing.
+
+Nothing in the exit code, the output or the banner showed it. It was caught by
+querying the cloud database afterwards and finding two days of history where five
+had just been reported as shipped. In hindsight the tell was an absence: `staging
+restored` never printed, and no staging database existed, while a 110 MB dump sat
+untouched on the host.
+
+**Fix.** The remote half is written to a file, copied with `scp` and executed, so
+no command that reads stdin can consume it, and the `ssh` call takes `</dev/null`
+as well.
+
+**The lesson, which generalises past this script.** A pipeline whose only success
+signal is its own final `echo` cannot distinguish finishing from stopping early.
+Every step that claims to have moved data now prints its own before and after row
+counts, so the claim is checkable from the output rather than inferred from an
+exit code:
+
+```
+feed_versions        1 -> 1
+poll_log             2114 -> 14675
+vehicle_positions    147657 -> 1499293
+predictions          626821 -> 7473752
+```
+
+This is the third time in this project that a thing which looked like success was
+not: the leaked anchor in ADR-0038, the unmatched population in ADR-0043, and this.
+All three were found by checking the result against an independent source rather
+than by reading the code.
