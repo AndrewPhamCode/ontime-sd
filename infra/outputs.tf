@@ -38,3 +38,23 @@ output "instance_id" {
   description = "For Session Manager, which needs no SSH key and no security group rule."
   value       = aws_instance.collector.id
 }
+
+output "site_url" {
+  description = "The deployed application."
+  value       = "https://${aws_cloudfront_distribution.web.domain_name}"
+}
+
+output "web_bucket" {
+  description = "S3 bucket the built frontend is published to."
+  value       = aws_s3_bucket.web.id
+}
+
+output "distribution_id" {
+  description = "CloudFront distribution, for cache invalidation after a deploy."
+  value       = aws_cloudfront_distribution.web.id
+}
+
+output "github_deploy_role_arn" {
+  description = "Role GitHub Actions assumes. Goes in the workflow, not in a secret."
+  value       = aws_iam_role.github_deploy.arn
+}

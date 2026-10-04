@@ -89,3 +89,9 @@ variable "monthly_budget_usd" {
   type        = string
   default     = "45"
 }
+
+variable "github_repo" {
+  description = "owner/name of the repository allowed to assume the deploy role."
+  type        = string
+  default     = "AndrewPhamCode/ontime-sd"
+}

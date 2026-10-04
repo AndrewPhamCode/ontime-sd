@@ -387,6 +387,48 @@ A full data volume is the slow failure this design has. `make coverage` on the
 host shows what was lost. The volume can be grown in place:
 raise `data_volume_gb`, apply, then `sudo resize2fs /dev/nvme1n1`.
 
+### Deploying the web application
+
+The site is one CloudFront distribution with two origins: the built React app
+from a private S3 bucket, and the API from the instance that already holds the
+database. Same origin is the point. The frontend calls `/api/...` with relative
+paths, so there is no CORS configuration anywhere and nothing in the client that
+knows where the API lives.
+
+    make infra-apply        # creates the bucket, the distribution and the deploy role
+    make infra-output       # site_url is the public address
+
+Deploys happen on push to main through `.github/workflows/deploy.yml`. The
+workflow runs the Python suite against a real Postgres and the frontend checks
+first, then publishes. It authenticates with GitHub OIDC, so there are no AWS
+keys in the repository: the role trusts only this repo on refs/heads/main.
+
+To deploy by hand:
+
+    cd web && npx vite build
+    aws s3 sync web/dist "s3://$(terraform -chdir=infra output -raw web_bucket)" --delete
+    aws cloudfront create-invalidation \
+      --distribution-id "$(terraform -chdir=infra output -raw distribution_id)" --paths '/*'
+
+### When the site is up but the data is wrong
+
+Work out which layer first, because they fail differently:
+
+| Symptom | Likely layer |
+| --- | --- |
+| Page loads, panels say "could not load" | API or nginx on the instance |
+| Page itself 404s or shows stale assets | S3 or the CloudFront cache |
+| Numbers load but look stale | the API's own 60s cache, by design |
+
+    curl -s https://<site>/healthz                 # the API, through CloudFront
+    make ssh-aws                                   # then: systemctl status ontime-api nginx
+    sudo tail -50 /var/log/ontime-sd/api.err.log
+
+The edge never caches `/api/*`. That is deliberate: the API already caches for
+sixty seconds keyed on every parameter that changes the result, and a second
+cache in front of it would answer a changed setting with the previous setting's
+numbers, which is the bug ADR-0039 exists to prevent.
+
 ### Tearing it down
 
     make infra-destroy

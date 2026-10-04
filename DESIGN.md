@@ -1766,3 +1766,85 @@ the laptop's measured 35 to 67%, which is the point. Growth is about 0.55 GB a
 day of raw capture. The first thing to break is disk, and the first mitigation is
 a rollup of `vehicle_positions` older than the training window, since the model
 reads segment aggregates rather than individual pings.
+
+## ADR-0042: One distribution, two origins, and no CORS anywhere
+
+**Status:** Accepted
+
+**Context.** The application ran only on localhost, with Vite proxying `/api` to
+a local FastAPI process. A portfolio project nobody can open is not finished, and
+the thing that makes it credible to a stranger is a working link, not a
+particular framework.
+
+**Decision.** A single CloudFront distribution with two origins: the built React
+app from a private S3 bucket, and the API from the EC2 instance that already runs
+the collector and Postgres.
+
+The frontend already fetched `/api/...` with relative paths, and the Vite config
+had said for weeks that production would be same origin. Honouring that is what
+makes everything else simple: no CORS configuration, no preflight requests, no
+environment variable telling the client where the API lives, and no second
+certificate. The frontend needed no code changes at all.
+
+### Why the API shares the instance
+
+A separate service for a read-only API would be a second thing to pay for and
+operate. The API's only job is querying the database, the database is on this
+box, and the query goes over localhost instead of the network. The honest limit
+is that a traffic spike would make the API and the collector compete for the same
+two cores, and the collector is the one that must never lose. That is acceptable
+at portfolio traffic and would not be at real traffic, where the answer is a read
+replica rather than a bigger box.
+
+### The origin is not reachable directly
+
+The instance accepts port 80 only from AWS's `cloudfront.origin-facing` managed
+prefix list, not from `0.0.0.0/0`. A request therefore has to arrive through the
+distribution, which is where HTTPS and the caching rules are. nginx on the box
+proxies to uvicorn on localhost and returns a flat 404 for anything that is not
+`/api/` or `/healthz`, so the origin serves nothing it does not have to.
+
+The hop from CloudFront to the instance is plain HTTP. That is the trade for not
+running a certificate on a host with no domain name of its own; the traffic is
+inside AWS and the data is public transit predictions. A custom domain would make
+end to end TLS straightforward and is the natural next step.
+
+### The edge never caches the API
+
+`/api/*` uses `Managed-CachingDisabled`. The API already caches for sixty seconds
+keyed on every parameter that changes the result, and ADR-0039 exists because a
+cache that ignores a parameter answers a changed setting with the previous
+setting's numbers. Putting a second cache in front of it would reintroduce
+exactly that bug one layer up, where it would be harder to see.
+
+### Deploys carry no AWS credentials
+
+GitHub Actions assumes a role through OIDC rather than holding access keys. The
+trust policy names one repository and one branch, so a fork or another repo
+cannot assume it, and there is nothing in the repository secrets worth stealing.
+The role can write the bucket, invalidate the distribution, and send one pinned
+SSM document to one instance. It cannot open a shell or touch anything else.
+
+Tests gate the deploy. The suite runs against a real Postgres service container,
+and the collector is deliberately **not** restarted by a deploy: it is the
+process that must never stop, and a frontend change is no reason to interrupt it.
+
+**Rejected alternatives.**
+
+- **S3 website hosting with a separate API domain.** Rejected because it requires
+  CORS, a second certificate, and a client that knows two addresses.
+- **An Application Load Balancer in front of the API.** The clean answer for TLS
+  to the origin, rejected on cost: an ALB is roughly $16 a month, comparable to
+  the entire rest of the stack, to serve a read-only API.
+- **Serving the React build from nginx on the instance.** Simplest possible, and
+  rejected because it puts static asset traffic on the box that must keep
+  collecting, and gives up the CDN and free HTTPS for nothing.
+- **Rebuilding the frontend in Next.js.** Considered because the name is more
+  recognisable. Rejected because a map application needs no server rendering, and
+  the thing that convinces a reader is a link that works over real data.
+
+**What this does not solve.** The instance is now a single point of failure for
+the site as well as collection. There is no custom domain, so the URL is a
+CloudFront hash. And nothing here deploys a staging environment: main goes
+straight to production, which is the right trade for one developer and the wrong
+one for a team.
