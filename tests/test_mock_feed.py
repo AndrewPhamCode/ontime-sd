@@ -26,9 +26,31 @@ from tests.conftest import make_settings
 VEHICLE_COUNT = 6
 
 
+def simulator_with_bus_mid_route(vehicle_count: int = VEHICLE_COUNT) -> Simulator:
+    """A simulator whose first bus is a quarter of the way along its route.
+
+    Vehicle position is derived from wall clock time, so a plain Simulator puts
+    the first bus wherever the clock happens to leave it. When that is the final
+    stop, only one stop lies ahead and a test asserting several upcoming
+    predictions fails for reasons that have nothing to do with the code. Pinning
+    the epoch relative to now fixes the position without freezing time.
+    """
+    probe = Simulator(vehicle_count=vehicle_count)
+    bus = probe.vehicles[0]
+    target_m = probe.route.length_m * 0.25
+    elapsed_s = (target_m - bus.offset_m) / bus.speed_mps
+    return Simulator(
+        vehicle_count=vehicle_count,
+        epoch=datetime.now(UTC) - timedelta(seconds=elapsed_s),
+    )
+
+
 @pytest_asyncio.fixture(loop_scope="session")
 async def mock_server() -> AsyncIterator[tuple[MockFeedServer, str]]:
-    server = MockFeedServer(make_settings(mock_vehicle_count=VEHICLE_COUNT))
+    server = MockFeedServer(
+        make_settings(mock_vehicle_count=VEHICLE_COUNT),
+        simulator=simulator_with_bus_mid_route(),
+    )
     port = await server.start(0)
     try:
         yield server, server.base_url(port)
