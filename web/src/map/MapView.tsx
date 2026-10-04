@@ -212,8 +212,12 @@ export function MapView({
         const stopId = event.features?.[0]?.properties?.['stop_id'];
         if (typeof stopId === 'string') onSelect(stopId);
       });
+      // mousemove, not mouseenter: vehicles draw with icon-allow-overlap, so
+      // moving from one bus to the one beside it never leaves the layer and
+      // mouseenter does not fire again. The popup would keep the first bus's
+      // route and position while the cursor sat on a different bus.
       for (const layer of ['stops', 'vehicles']) {
-        instance.on('mouseenter', layer, (event) => {
+        instance.on('mousemove', layer, (event) => {
           instance.getCanvas().style.cursor = layer === 'stops' ? 'pointer' : '';
           const props = event.features?.[0]?.properties;
           if (!props) return;
