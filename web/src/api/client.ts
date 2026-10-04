@@ -53,6 +53,7 @@ export interface Params {
   minSample: number;
   labelFilter: number;
   compare: string;
+  timeBand: string;
 }
 
 const query = (parts: Record<string, string | number>) =>
@@ -62,7 +63,9 @@ const query = (parts: Record<string, string | number>) =>
 
 export const api = {
   headline: (p: Params) =>
-    get<Headline>(`/api/headline?${query({ max_ping_gap: p.labelFilter })}`),
+    get<Headline>(
+      `/api/headline?${query({ max_ping_gap: p.labelFilter, time_band: p.timeBand })}`,
+    ),
   window: () => get<Window>('/api/window'),
   routes: (p: Params) =>
     get<RouteComparison[]>(
@@ -70,6 +73,7 @@ export const api = {
         horizon: p.horizon,
         max_ping_gap: p.labelFilter,
         compare: p.compare,
+        time_band: p.timeBand,
       })}`,
     ),
   distribution: (p: Params) =>
@@ -77,6 +81,7 @@ export const api = {
       `/api/error-distribution?${query({
         horizon: p.horizon,
         max_ping_gap: p.labelFilter,
+        time_band: p.timeBand,
       })}`,
     ),
   dataQuality: (p: Params) =>

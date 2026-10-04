@@ -39,6 +39,67 @@ CACHE_TTL_SECONDS = 60.0
 
 SOURCES = ("mts", "persist_delay", "segment_mean", "lgbm")
 
+# Time of day bands, in minutes past the service day's midnight.
+#
+# The charter asks for error broken down by time of day, because a prediction
+# problem at 17:30 is a different problem from one at 11:00 and an all-day average
+# hides both. `prediction_errors.service_minute` already stores the key, so this is
+# a filter rather than new data.
+#
+# Bands are **exhaustive and non-overlapping**, which is not decoration: it means
+# the per-band row counts sum to the all-day count, and a test asserts it. A
+# visitor who sees four bands that do not add up has no reason to trust any of the
+# numbers on the page. `late` is the awkward one and the reason the property needs
+# checking: GTFS times run past 24:00:00 for trips that cross midnight, so service
+# minute 1500 is 01:00 on the following calendar day and belongs with the small
+# hours, not after the evening.
+TIME_BANDS: dict[str, tuple[int, int] | None] = {
+    "all": None,
+    "am_rush": (360, 540),
+    "midday": (540, 900),
+    "pm_rush": (900, 1140),
+    "evening": (1140, 1440),
+    "late": (1440, 360),
+}
+
+
+def validate_time_band(band: str) -> str:
+    """Reject an unknown band instead of silently returning every row.
+
+    Falling back to "all" would be worse than a 422: the page would show the
+    unfiltered number under a band's label, which is a wrong answer presented
+    confidently. Same reasoning as validate_source.
+    """
+    if band not in TIME_BANDS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown time band {band!r}, expected one of {', '.join(TIME_BANDS)}",
+        )
+    return band
+
+
+def time_band_clause(band: str, param_index: int) -> tuple[str, list[int]]:
+    """SQL fragment and parameters restricting rows to a band.
+
+    Returns an empty fragment for "all" so the common case adds nothing to the
+    query. `late` wraps around midnight, so it is the one band expressed as a
+    disjunction rather than a range.
+    """
+    bounds = TIME_BANDS[band]
+    if bounds is None:
+        return "", []
+    low, high = bounds
+    if low < high:
+        return f" and service_minute >= ${param_index} and service_minute < ${param_index + 1}", [
+            low,
+            high,
+        ]
+    # Wraps: on or after `low`, or before `high`.
+    return f" and (service_minute >= ${param_index} or service_minute < ${param_index + 1})", [
+        low,
+        high,
+    ]
+
 
 class _TtlCache:
     """Tiny in-process cache. Not shared between workers, which is fine for one."""
@@ -90,6 +151,11 @@ class Headline(BaseModel):
     rows: list[SourceHorizon]
     label_filter_seconds: int = Field(
         description="Arrivals with a wider ping gap than this are excluded."
+    )
+    time_band: str = Field(
+        default="all",
+        description="Time of day band these figures cover. Echoed back so the page "
+        "can state which slice it is showing rather than implying all day.",
     )
 
 
@@ -409,11 +475,15 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
             le=3600,
             description="Widest GPS gap behind an arrival that still counts",
         ),
+        time_band: str = Query("all", description="Time of day band, see TIME_BANDS"),
     ) -> Headline:
+        validate_time_band(time_band)
+
         async def produce() -> Headline:
             win = await resolve_window()
+            band_sql, band_args = time_band_clause(time_band, 4)
             rows = await db().fetch(
-                """
+                f"""
                 select source, horizon_minutes,
                        count(*)                                        as n,
                        avg(abs_error_seconds)::float8                  as mae_seconds,
@@ -426,23 +496,26 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                 where has_all_horizons
                   and ping_gap_seconds <= $3
                   and start_date between $1 and $2
+                  {band_sql}
                 group by source, horizon_minutes
                 order by source, horizon_minutes
                 """,
                 win.test_from,
                 win.test_to,
                 max_ping_gap,
+                *band_args,
             )
             return Headline(
                 window=win,
                 rows=[SourceHorizon(**dict(row)) for row in rows],
                 label_filter_seconds=max_ping_gap,
+                time_band=time_band,
             )
 
         # The key carries every parameter that changes the result. Without that,
         # moving a setting would return the previous setting's numbers for up to
         # a minute with nothing on screen saying so.
-        return await cache.get(f"headline:{max_ping_gap}", produce)
+        return await cache.get(f"headline:{max_ping_gap}:{time_band}", produce)
 
     @app.get("/api/routes", response_model=list[RouteComparison])
     async def routes(
@@ -450,13 +523,16 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
         min_n: int = Query(100, description="Minimum pairs for a route to appear"),
         max_ping_gap: int = Query(TIGHT_LABEL_SECONDS, ge=30, le=3600),
         compare: str = Query("lgbm", description="Predictor to compare MTS against"),
+        time_band: str = Query("all", description="Time of day band, see TIME_BANDS"),
     ) -> list[RouteComparison]:
         validate_source(compare)
+        validate_time_band(time_band)
 
         async def produce() -> list[RouteComparison]:
             win = await resolve_window()
+            band_sql, band_args = time_band_clause(time_band, 7)
             rows = await db().fetch(
-                """
+                f"""
                 select pe.route_id,
                        max(r.route_long_name)                             as route_name,
                        count(*) filter (where pe.source = 'mts')          as n,
@@ -472,6 +548,7 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                   and pe.ping_gap_seconds <= $4
                   and pe.start_date between $1 and $2
                   and pe.route_id is not null
+                  {band_sql}
                 group by pe.route_id
                 having count(*) filter (where pe.source = 'mts') >= $5
                 order by (avg(pe.abs_error_seconds) filter (where pe.source = 'mts')) desc
@@ -482,6 +559,7 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                 max_ping_gap,
                 min_n,
                 compare,
+                *band_args,
             )
             out = []
             for row in rows:
@@ -499,17 +577,23 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                 )
             return out
 
-        return await cache.get(f"routes:{horizon}:{min_n}:{max_ping_gap}:{compare}", produce)
+        return await cache.get(
+            f"routes:{horizon}:{min_n}:{max_ping_gap}:{compare}:{time_band}", produce
+        )
 
     @app.get("/api/error-distribution", response_model=list[DistributionBucket])
     async def error_distribution(
         horizon: int = Query(10, description="Horizon in minutes"),
         max_ping_gap: int = Query(TIGHT_LABEL_SECONDS, ge=30, le=3600),
+        time_band: str = Query("all", description="Time of day band, see TIME_BANDS"),
     ) -> list[DistributionBucket]:
+        validate_time_band(time_band)
+
         async def produce() -> list[DistributionBucket]:
             win = await resolve_window()
+            band_sql, band_args = time_band_clause(time_band, 5)
             rows = await db().fetch(
-                """
+                f"""
                 select source,
                        width_bucket(abs_error_seconds, 0, 600, 10) as bucket,
                        count(*) as n
@@ -518,6 +602,7 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                   and has_all_horizons
                   and ping_gap_seconds <= $4
                   and start_date between $1 and $2
+                  {band_sql}
                 group by source, bucket
                 order by source, bucket
                 """,
@@ -525,6 +610,7 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                 win.test_to,
                 horizon,
                 max_ping_gap,
+                *band_args,
             )
             return [
                 DistributionBucket(
@@ -535,7 +621,7 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                 for row in rows
             ]
 
-        return await cache.get(f"dist:{horizon}:{max_ping_gap}", produce)
+        return await cache.get(f"dist:{horizon}:{max_ping_gap}:{time_band}", produce)
 
     @app.get("/api/data-quality", response_model=DataQuality)
     async def data_quality(

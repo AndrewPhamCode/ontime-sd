@@ -17,7 +17,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from ontime_sd.api import create_app
+from ontime_sd.api import TIME_BANDS, create_app
 from tests.conftest import make_settings
 
 DAY_TRAIN = date(2026, 10, 1)
@@ -684,3 +684,130 @@ def test_the_minimum_sample_threshold_is_a_parameter_not_a_constant() -> None:
     # Raising it past the evidence refuses a correction that the default allowed.
     _, basis, _ = choose_bias(91, -131.0, 0, None, min_stop_route=100)
     assert basis == BASIS_NONE
+
+
+# --- time of day bands --------------------------------------------------------
+
+
+def test_every_service_minute_falls_in_exactly_one_band() -> None:
+    """Exhaustive and non-overlapping, so per-band counts sum to the all-day count.
+
+    Not a stylistic preference. A page showing five bands whose row counts do not
+    add up to the total gives a visitor a concrete reason to distrust every other
+    number on it. GTFS service times run past 24:00:00 for trips crossing
+    midnight, so the range checked here goes beyond 1440.
+    """
+    bands = {name: bounds for name, bounds in TIME_BANDS.items() if bounds is not None}
+
+    def contains(bounds: tuple[int, int], minute: int) -> bool:
+        low, high = bounds
+        if low < high:
+            return low <= minute < high
+        # Wraps around midnight, which is the case worth checking.
+        return minute >= low or minute < high
+
+    for minute in range(0, 1740):
+        matches = [name for name, bounds in bands.items() if contains(bounds, minute)]
+        assert len(matches) == 1, f"service minute {minute} matched {matches}"
+
+
+@pytest.mark.usefixtures("clean")
+async def test_a_band_excludes_arrivals_outside_it(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    await _seed(db_pool)
+
+    # The fixture sits at service minute 720, which is midday.
+    midday = (await client.get("/api/headline?time_band=midday")).json()
+    am_rush = (await client.get("/api/headline?time_band=am_rush")).json()
+
+    assert midday["rows"], "midday should contain the seeded arrival"
+    assert am_rush["rows"] == [], "the morning band must not borrow midday's rows"
+
+
+@pytest.mark.usefixtures("clean")
+async def test_bands_partition_the_all_day_population(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    """The property the exhaustiveness test asserts in the abstract, over real rows."""
+    await _seed(db_pool)
+    # A second arrival in the evening, so more than one band is populated.
+    await db_pool.execute(
+        """
+        insert into prediction_errors (
+            start_date, trip_id, stop_sequence, horizon_minutes, source,
+            feed_version, stop_id, route_id, arrived_at, predicted_arrival,
+            predicted_at, error_seconds, abs_error_seconds, ping_gap_seconds,
+            service_minute, is_weekend, has_all_horizons)
+        values ($1::date,'trip-1',4,10,'mts',$2::text,'stop-A','route-9',
+                $3::timestamptz, $3::timestamptz,
+                -- The schema enforces that a prediction precedes its own cutoff.
+                $3::timestamptz - interval '10 minutes', 0, 0, 30,
+                1200, false, true)
+        """,
+        DAY_TEST,
+        VERSION,
+        ARRIVED,
+    )
+
+    def mts_at_ten(body: dict) -> int:
+        rows = [
+            row for row in body["rows"] if row["source"] == "mts" and row["horizon_minutes"] == 10
+        ]
+        return rows[0]["n"] if rows else 0
+
+    all_day = mts_at_ten((await client.get("/api/headline?time_band=all")).json())
+    per_band = 0
+    for band in ("am_rush", "midday", "pm_rush", "evening", "late"):
+        per_band += mts_at_ten((await client.get(f"/api/headline?time_band={band}")).json())
+
+    assert per_band == all_day == 2
+
+
+@pytest.mark.usefixtures("clean")
+async def test_an_unknown_band_is_rejected_rather_than_ignored(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    """Falling back to all-day would show the unfiltered number under a band label."""
+    await _seed(db_pool)
+
+    response = await client.get("/api/headline?time_band=rush")
+
+    assert response.status_code == 422
+
+
+@pytest.mark.usefixtures("clean")
+async def test_two_bands_do_not_share_a_cache_entry(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    """The ADR-0039 invariant, extended to the new parameter.
+
+    Every cache key must contain every parameter that changes the result. A band
+    missing from the key would serve the previous band's numbers for up to the
+    cache TTL with nothing on screen saying so, which is the exact bug the
+    settings work was built to fix.
+    """
+    await _seed(db_pool)
+
+    midday = (await client.get("/api/headline?time_band=midday")).json()
+    am_rush = (await client.get("/api/headline?time_band=am_rush")).json()
+
+    assert midday["time_band"] == "midday"
+    assert am_rush["time_band"] == "am_rush"
+    assert midday["rows"] != am_rush["rows"]
+
+
+@pytest.mark.usefixtures("clean")
+async def test_the_band_reaches_routes_and_distribution_too(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    await _seed(db_pool)
+
+    routes = await client.get("/api/routes?min_n=1&time_band=am_rush")
+    dist = await client.get("/api/error-distribution?time_band=am_rush")
+
+    assert routes.status_code == 200
+    assert dist.status_code == 200
+    # Seeded row is midday, so the morning band is empty on both endpoints.
+    assert routes.json() == []
+    assert dist.json() == []
