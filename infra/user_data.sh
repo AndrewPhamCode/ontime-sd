@@ -10,7 +10,7 @@ DATA_DIR=/var/lib/ontime-sd
 DEVICE=/dev/nvme1n1   # EBS attached as /dev/sdf appears as an NVMe device on Nitro
 
 dnf -y update
-dnf -y install docker git postgresql16 jq
+dnf -y install docker git postgresql16 jq nginx
 
 # ---------------------------------------------------------------- data volume
 # Format only if there is no filesystem. A rebuilt instance must mount the
@@ -197,6 +197,94 @@ OnUnitActiveSec=1min
 WantedBy=timers.target
 UNIT
 
+# ------------------------------------------------------------------- the API
+# uvicorn stays bound to localhost and nginx faces CloudFront. nginx handles the
+# slow client and concurrency problems that a single uvicorn worker is bad at,
+# and keeps the application off a public port entirely.
+cat > /etc/systemd/system/ontime-api.service <<'UNIT'
+[Unit]
+Description=OnTime SD read-only API
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ontime
+WorkingDirectory=/opt/ontime-sd
+ExecStart=/home/ontime/.local/bin/uv run --project /opt/ontime-sd ontime-api
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/ontime-sd/api.log
+StandardError=append:/var/log/ontime-sd/api.err.log
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# Only the two paths CloudFront routes here. Anything else gets a flat 404
+# rather than revealing that this is a general purpose host.
+cat > /etc/nginx/conf.d/ontime.conf <<'NGINX'
+server {
+    listen 80 default_server;
+    server_name _;
+
+    # The instance is only reachable from CloudFront, but a direct request to
+    # the IP would still arrive if the prefix list ever changed, so the origin
+    # does not serve anything it does not have to.
+    location / { return 404; }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 60s;
+    }
+
+    # The API's own health endpoint, on 8000. The collector has a separate one
+    # on 8080 which stays internal: it is what the CloudWatch staleness metric
+    # reads, and it is not something a visitor should be able to poll.
+    location = /healthz {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+NGINX
+
+# The stock nginx.conf carries its own default server on port 80, which collides
+# with ours. Replacing the whole file is deterministic; editing server blocks out
+# of it with sed is not, and a half edited config that still passes nginx -t is
+# worse than no config at all.
+cat > /etc/nginx/nginx.conf <<'NGINXMAIN'
+user nginx;
+worker_processes auto;
+error_log /var/log/nginx/error.log notice;
+pid /run/nginx.pid;
+
+events { worker_connections 1024; }
+
+http {
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
+    access_log /var/log/nginx/access.log main;
+
+    sendfile on;
+    tcp_nopush on;
+    keepalive_timeout 65;
+    types_hash_max_size 4096;
+    server_tokens off;
+
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    include /etc/nginx/conf.d/*.conf;
+}
+NGINXMAIN
+
+nginx -t
+
 mkdir -p /var/log/ontime-sd
 chown -R "$APP_USER:$APP_USER" /var/log/ontime-sd
 
@@ -213,5 +301,7 @@ ROTATE
 
 systemctl daemon-reload
 systemctl enable --now ontime-collector.service
+systemctl enable --now ontime-api.service
+systemctl enable --now nginx
 systemctl enable --now ontime-gtfs.timer
 systemctl enable --now ontime-staleness.timer

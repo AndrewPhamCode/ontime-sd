@@ -71,3 +71,20 @@ resource "aws_vpc_security_group_egress_rule" "all" {
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "-1"
 }
+
+# CloudFront reaches the API over port 80, and nothing else does. Using AWS's
+# managed prefix list rather than 0.0.0.0/0 means the origin is not browsable
+# directly: a request has to come through the distribution, which is where the
+# HTTPS and the caching rules live.
+data "aws_ec2_managed_prefix_list" "cloudfront" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "api_from_cloudfront" {
+  security_group_id = aws_security_group.collector.id
+  description       = "API, from CloudFront edge locations only"
+  prefix_list_id    = data.aws_ec2_managed_prefix_list.cloudfront.id
+  from_port         = 80
+  to_port           = 80
+  ip_protocol       = "tcp"
+}

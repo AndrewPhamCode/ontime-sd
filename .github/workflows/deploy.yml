@@ -1,0 +1,170 @@
+name: deploy
+
+# Tests gate the deploy. A push that breaks the suite should not reach the site,
+# and the collector on the same host should not be restarted by a bad commit.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # required to request the OIDC token
+
+env:
+  AWS_REGION: us-west-2
+  ROLE_ARN: arn:aws:iam::611955806928:role/ontime-sd-github-deploy
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ontime
+          POSTGRES_PASSWORD: ontime
+          POSTGRES_DB: ontime_sd
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd "pg_isready -U ontime -d ontime_sd"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Python suite against a real Postgres
+        env:
+          DATABASE_URL: postgresql://ontime:ontime@localhost:5433/ontime_sd
+        run: |
+          uv sync
+          uv run ruff check .
+          uv run pytest -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Frontend checks
+        working-directory: web
+        run: |
+          npm ci
+          npm run typecheck
+          npm run lint
+          npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the frontend
+        working-directory: web
+        run: |
+          npm ci
+          npx vite build
+
+      - name: Assume the deploy role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Resolved from AWS rather than stored as repository variables, so there
+      # is nothing to keep in sync by hand if the stack is ever rebuilt.
+      - name: Resolve the bucket and distribution
+        id: targets
+        run: |
+          bucket=$(aws s3api list-buckets \
+            --query "Buckets[?starts_with(Name,'ontime-sd-web-')].Name | [0]" --output text)
+          distribution=$(aws cloudfront list-distributions \
+            --query "DistributionList.Items[?Comment=='ontime-sd'].Id | [0]" --output text)
+          test "$bucket" != "None" && test "$distribution" != "None" || {
+            echo "could not resolve the deploy targets; has terraform been applied?" >&2
+            exit 1
+          }
+          # The instance id changes whenever the bootstrap changes, because the
+          # box is disposable by design, so it is looked up rather than pinned.
+          instance=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=ontime-sd-collector" \
+                      "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" --output text)
+          test "$instance" != "None" || { echo "no running collector host" >&2; exit 1; }
+
+          echo "bucket=$bucket" >> "$GITHUB_OUTPUT"
+          echo "distribution=$distribution" >> "$GITHUB_OUTPUT"
+          echo "instance=$instance" >> "$GITHUB_OUTPUT"
+          echo "publishing to $bucket via $distribution, api on $instance"
+
+      - name: Publish the site
+        run: |
+          # Hashed assets are immutable and cached for a year; index.html must
+          # never be, or a deploy ships new assets behind a stale entry point.
+          aws s3 sync web/dist "s3://${{ steps.targets.outputs.bucket }}" \
+            --delete --exclude index.html \
+            --cache-control "public,max-age=31536000,immutable"
+          aws s3 cp web/dist/index.html "s3://${{ steps.targets.outputs.bucket }}/index.html" \
+            --cache-control "no-cache,must-revalidate"
+
+      - name: Expire the edge cache for the entry point
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ steps.targets.outputs.distribution }}" \
+            --paths "/index.html" "/"
+
+      - name: Deploy the API to the instance
+        run: |
+          cmd=$(aws ssm send-command \
+            --instance-ids "${{ steps.targets.outputs.instance }}" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy ${{ github.sha }}" \
+            --parameters 'commands=[
+              "set -euo pipefail",
+              "cd /opt/ontime-sd",
+              "git fetch --depth 1 origin main",
+              "git reset --hard FETCH_HEAD",
+              "chown -R ontime:ontime /opt/ontime-sd",
+              "sudo -u ontime /home/ontime/.local/bin/uv sync --project /opt/ontime-sd",
+              "sudo -u ontime /home/ontime/.local/bin/uv run --project /opt/ontime-sd ontime-migrate",
+              "systemctl restart ontime-api",
+              "sleep 5",
+              "systemctl is-active ontime-api"
+            ]' \
+            --query Command.CommandId --output text)
+
+          for _ in $(seq 1 60); do
+            status=$(aws ssm get-command-invocation --command-id "$cmd" \
+              --instance-id "${{ steps.targets.outputs.instance }}" --query Status --output text 2>/dev/null || echo Pending)
+            case "$status" in
+              Success) break ;;
+              Failed|TimedOut|Cancelled)
+                aws ssm get-command-invocation --command-id "$cmd" --instance-id "${{ steps.targets.outputs.instance }}" \
+                  --query '[StandardOutputContent,StandardErrorContent]' --output text
+                exit 1 ;;
+            esac
+            sleep 5
+          done
+
+          # The collector is deliberately not restarted here. It is the thing
+          # that must never stop, and a frontend change is no reason to
+          # interrupt it.
+          aws ssm get-command-invocation --command-id "$cmd" --instance-id "${{ steps.targets.outputs.instance }}" \
+            --query StandardOutputContent --output text
