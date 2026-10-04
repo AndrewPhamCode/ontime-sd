@@ -1848,3 +1848,117 @@ the site as well as collection. There is no custom domain, so the URL is a
 CloudFront hash. And nothing here deploys a staging environment: main goes
 straight to production, which is the right trade for one developer and the wrong
 one for a team.
+
+## ADR-0043: The head-to-head was averaging two different populations
+
+**Status:** Accepted
+
+`scripts/compare.sql` printed `count(*) filter (where source='mts')` as the row
+count while averaging each source over its own rows. Those are not the same rows.
+The model only predicts where an anchor exists, which is 97.9% of scored arrivals
+at the one minute horizon but **77.3% at twenty minutes**, and the rows it declines
+are the hard ones near the start of a trip where no stop has been observed yet.
+
+So MTS was being charged for cases the model never attempted. Corrected to a
+matched population, the model's apparent lead at 10 and 20 minutes disappeared:
+
+| Horizon | MTS | lgbm, own rows | MTS | lgbm, matched rows |
+| --- | --- | --- | --- | --- |
+| 5 min | 1.40 | **1.38** | 1.37 | 1.38 |
+| 10 min | 1.77 | **1.73** | 1.68 | 1.73 |
+| 20 min | 2.31 | **2.31** | 2.16 | 2.31 |
+
+The script now computes the matched set with a `having count(distinct source) = 4`
+and reports coverage separately, so the population and the accuracy are two
+numbers rather than one blended one.
+
+**The lesson, which is the same one as ADR-0038 in a new disguise.** The arithmetic
+was right both times. What was wrong was which rows it ran over. A model that can
+decline the hard cases and be scored only on the easy ones will always look good,
+and nothing in the average reveals it. Coverage belongs beside every accuracy
+number it is derived from.
+
+## ADR-0044: Clamping to the cutoff, and the elapsed-time feature that is banned
+
+**Status:** Accepted
+
+**Two things that look equally reasonable, one of which is a leak.**
+
+**Clamping, which is kept.** The model forecasts travel time from the anchor, and
+the anchor is already in the past when the prediction is made, so an underestimate
+can place the arrival *before the moment of prediction*. That is knowably wrong
+when it is made: a bus that has not arrived cannot have already arrived. 13.9% of
+one minute predictions landed in the past. Clamping the output to the cutoff uses
+only the cutoff, which is known at prediction time.
+
+It is also, by a wide margin, the largest single improvement in this phase:
+
+| Horizon | lgbm raw | lgbm clamped |
+| --- | --- | --- |
+| 1 min | 0.88 | **0.66** |
+| 5 min | 1.36 | **1.25** |
+| 10 min | 1.73 | **1.66** |
+| 20 min | 2.26 | **2.22** |
+
+**MTS gets the same clamp when comparing.** MTS's published predictions land in the
+past 15.5% of the time at one minute out, and clamping them improves MTS from 0.92
+to **0.77**. Reporting our clamped model against their unclamped output would have
+claimed 28% when the honest figure against like-for-like post-processing is 14%.
+Both numbers are worth stating, because they answer different questions: 0.92 is
+what a rider actually experiences, 0.77 is what their model is worth.
+
+**Elapsed time since the anchor, which is banned.** `cutoff - anchor_arrived_at` is
+genuinely available at prediction time and would genuinely help in production, where
+a bus that left the anchor 400 seconds ago and still has not arrived is running
+slow. It is still forbidden here, because this evaluation defines the cutoff as
+`arrived_at - horizon`, which makes elapsed time equal to `label - horizon`
+identically. A model given it learns "answer = elapsed + constant", scores
+beautifully, and is worthless. MTS gets no such hint, so neither does the model.
+
+**The distinction.** Clamping uses the cutoff as a *bound* on the answer, which is
+information a deployed system has. Elapsed time uses the cutoff as a *measurement
+of* the answer, which only this evaluation's construction makes possible. Same
+input, opposite verdicts.
+
+## ADR-0045: Features that did not work, recorded so they are not tried again
+
+**Status:** Accepted
+
+Four changes were made on the theory that the model was information-starved
+relative to MTS. Measured independently of the clamp, together they moved the ten
+minute MAE from 1.73 to 1.73.
+
+| Change | Gain share | Effect on MAE |
+| --- | --- | --- |
+| Route-level recent delay from other vehicles | 0.12% | none measurable |
+| Observation count behind that delay | 0.12% | none measurable |
+| `MAX_STOPS_AHEAD` 12 to 30, far pairs sampled | n/a | ~0.05 min at 20 min |
+| `route_index` as a categorical | 1.59% | none measurable |
+| Early stopping instead of 300 fixed rounds | n/a | chose 175, no MAE change |
+
+**Why the network-state feature failed.** The theory was that the fleet's recent
+delay on a route is the only fresh signal available without GPS, since the model's
+own anchor is a median of 150 seconds stale against GPS's 55. It carries 0.12% of
+the gain. `anchor_delay_seconds` already says how late *this* bus is, and a
+route-wide average adds little beyond it: buses on the same route are not late
+together nearly as much as the theory assumed.
+
+**Why raising the training cap barely helped, contrary to the diagnosis.** The
+reasoning was that 78.7% of twenty minute rows asked about distances outside the
+training range, and trees cannot extrapolate. True, but `stops_ahead` carries
+**0.05%** of the gain. The model never leaned on it. `segment_sum_seconds` carries
+**90.5%**, and a sum of per-segment means grows with distance on its own, so the
+quantity that mattered was never out of range. The cap was raised anyway, since
+sampling costs nothing and the mismatch was real, but it was not the bottleneck
+and the original diagnosis was wrong.
+
+**`is_weekend` is dead:** exactly 0.00% of gain, because the train and test windows
+are Mon-Wed and Thu-Fri. It is kept rather than deleted, since the collector is now
+accumulating weekends and it becomes real the moment a weekend enters the window.
+
+**What this says about the model.** 90.5% of the gain sits in one feature that is
+the segment-mean baseline restated. The model is that baseline with a small
+learned correction, and it beats the baseline (2.10 against 1.66 at ten minutes)
+because the correction is worth having, not because it found structure of its own.
+Closing the remaining gap at twenty minutes needs the live position the agency has
+and this model is denied, not more features derived from stop arrivals.

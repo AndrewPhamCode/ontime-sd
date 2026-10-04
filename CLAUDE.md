@@ -10,7 +10,8 @@ This is Andrew's portfolio project. He has to defend every design decision in in
 
 - **Plan before code.** For any non-trivial change, propose the approach and tradeoffs first and wait for approval.
 - **Explain design choices** in plain terms as you go: why this data structure, why this query, what breaks at scale.
-- **Andrew writes the core logic himself** for: arrival inference (Phase 3), the evaluation metric (Phase 4), and the model (Phase 5). For those, explain the approach, write tests and scaffolding, review his code, but don't write the core algorithm unless he explicitly asks.
+- **Claude may write the model (Phase 5) directly**, including features, training and tuning. Andrew asked for this on 2026-10-04 to move faster on beating the MTS baseline. Explain every modelling choice as you go, because he still has to defend it in interviews. Arrival inference (Phase 3) and the evaluation metric (Phase 4) stay Andrew's: for those, explain the approach, write tests and scaffolding, review his code, but don't write the core algorithm unless he explicitly asks.
+- **Never buy a win.** No feature derived from MTS's own prediction, no loosening the label-quality filter to flatter a number, no tuning against the test window, and no reporting a cherry-picked subset as the headline. A result that cannot survive ADR-0038's standard is worth less than no result.
 - Small, focused commits. One concern per PR.
 - Never commit secrets. The API key lives only in `.env` (gitignored). Never use API keys found in other people's repos online.
 - Don't use em dashes in docs or comments.
@@ -61,7 +62,7 @@ Derive the ground truth: when did each vehicle actually arrive at each stop?
 - For each actual arrival, look up what MTS predicted at 1/5/10/20 min before. Compute MAE and p90 error per horizon, per route, per time of day.
 - This produces the number to beat.
 
-### Phase 5: Model (Andrew writes core logic)
+### Phase 5: Model
 - Baseline first: historical mean travel time per stop-to-stop segment by time-of-day bin and weekday/weekend.
 - Then LightGBM with features like segment, time bin, recent observed speeds on the segment, current delay.
 - Evaluate on a time-based split (train on earlier weeks, test on later). Never random splits.

@@ -7,13 +7,20 @@ appeared to beat MTS at every horizon. These pin the conditions that stopped it.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 import asyncpg
 import pytest
 
-from ontime_sd.features import Context, load_evaluation_contexts, segment_sum
+from ontime_sd.features import (
+    FEATURE_NAMES,
+    Context,
+    load_evaluation_contexts,
+    segment_sum,
+)
 from ontime_sd.model import (
+    _clamp_to_cutoff,
     predict_persist_delay,
     predict_segment_mean,
     run_phase5,
@@ -356,3 +363,54 @@ async def test_overlapping_train_and_test_windows_are_refused(
             test_from=date(2026, 10, 2),
             test_to=date(2026, 10, 4),
         )
+
+
+# --- clamping to the cutoff (ADR-0044) ---------------------------------------
+
+
+def test_a_prediction_landing_before_the_cutoff_is_pulled_up_to_it() -> None:
+    """A bus that has not arrived cannot already have arrived.
+
+    The model forecasts travel time from the anchor, and the anchor is in the past
+    when the prediction is made, so an underestimate can place the arrival before
+    the moment of prediction. 13.9% of one minute predictions did.
+    """
+    arrival = NOON + timedelta(minutes=10)
+    context = _context(anchor_arrived_at=NOON)
+    context = replace(context, horizon_minutes=1, actual_arrived_at=arrival, anchor_known_at=NOON)
+    cutoff = arrival - timedelta(minutes=1)
+
+    # 60 seconds from the anchor is well before the cutoff at arrival minus one.
+    assert _clamp_to_cutoff(context, 60.0) == cutoff
+
+
+def test_a_prediction_after_the_cutoff_is_left_alone() -> None:
+    arrival = NOON + timedelta(minutes=10)
+    context = replace(
+        _context(anchor_arrived_at=NOON),
+        horizon_minutes=1,
+        actual_arrived_at=arrival,
+        anchor_known_at=NOON,
+    )
+
+    # 11 minutes from the anchor is after the cutoff, so the clamp must not move it.
+    assert _clamp_to_cutoff(context, 660.0) == NOON + timedelta(minutes=11)
+
+
+def test_a_negative_travel_time_cannot_predict_before_the_anchor() -> None:
+    context = _context(anchor_arrived_at=NOON)
+
+    assert _clamp_to_cutoff(context, -500.0) >= NOON
+
+
+def test_elapsed_time_since_the_anchor_is_not_a_feature() -> None:
+    """The banned feature, pinned so it cannot be added back by accident.
+
+    `cutoff - anchor_arrived_at` is available at prediction time and would help in
+    production. In this evaluation the cutoff is `arrival - horizon`, so it equals
+    `label - horizon` identically and a model given it learns to restate the
+    answer. See ADR-0044 for why clamping on the same quantity is still fine: a
+    bound on the answer is not a measurement of it.
+    """
+    assert "seconds_since_anchor" not in FEATURE_NAMES
+    assert not any("elapsed" in name for name in FEATURE_NAMES)
