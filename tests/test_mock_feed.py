@@ -162,7 +162,13 @@ async def test_default_shape_omits_stop_sequence_like_the_real_feed() -> None:
     When it did, every prediction was dropped against the real feed while tests
     stayed green. See ADR-0034.
     """
-    server = MockFeedServer(make_settings(mock_vehicle_count=3))
+    # Pinned: a plain Simulator leaves the bus wherever the wall clock puts it,
+    # and at the final stop only one stop lies ahead, so the assertion below
+    # fails for reasons unrelated to the feed shape. Same flake as ADR-0035.
+    server = MockFeedServer(
+        make_settings(mock_vehicle_count=3),
+        simulator=simulator_with_bus_mid_route(3),
+    )
     port = await server.start(0)
     try:
         async with httpx.AsyncClient(timeout=10) as c:
@@ -182,7 +188,12 @@ async def test_default_shape_omits_stop_sequence_like_the_real_feed() -> None:
 
 async def test_rich_shape_populates_everything_optional() -> None:
     """Keeps the parser's fallback paths under test."""
-    server = MockFeedServer(make_settings(mock_vehicle_count=3, mock_feed_shape=SHAPE_RICH))
+    # Pinned for the same reason: stop_time_update[0] does not exist once the
+    # bus has passed its last stop.
+    server = MockFeedServer(
+        make_settings(mock_vehicle_count=3, mock_feed_shape=SHAPE_RICH),
+        simulator=simulator_with_bus_mid_route(3),
+    )
     port = await server.start(0)
     try:
         async with httpx.AsyncClient(timeout=10) as c:

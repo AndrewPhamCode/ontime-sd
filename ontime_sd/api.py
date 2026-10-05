@@ -178,7 +178,15 @@ class CoverageDay(BaseModel):
     day: date
     successful_polls: int
     hours_lost: float
-    coverage_pct: float
+    # Null when the day holds a single poll, because coverage is measured against
+    # the span from the first poll to the last and that span is then zero. The
+    # query's nullif guards the division; this makes the resulting null a value
+    # the model accepts rather than a 500.
+    #
+    # Deliberately not coalesced to 100. One poll in a day is not full coverage,
+    # and saying so would be a lie on the one panel whose whole job is to admit
+    # what the data does not support.
+    coverage_pct: float | None = None
 
 
 class LabelBand(BaseModel):

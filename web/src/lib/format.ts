@@ -137,7 +137,13 @@ export function bestSourceAt(rows: readonly HeadlineRow[], horizon: number): Sou
 export const COVERAGE_WARN_PCT = 80;
 export const COVERAGE_CRITICAL_PCT = 50;
 
-export function coverageStatus(pct: number): 'good' | 'warning' | 'critical' {
+/** `null` means the day held a single poll, so coverage was not measurable.
+ *  That is reported as unknown rather than folded into one of the three
+ *  statuses, because a day we cannot measure is not a day that went well. */
+export function coverageStatus(
+  pct: number | null | undefined,
+): 'good' | 'warning' | 'critical' | 'unknown' {
+  if (pct === null || pct === undefined || !Number.isFinite(pct)) return 'unknown';
   if (pct < COVERAGE_CRITICAL_PCT) return 'critical';
   if (pct < COVERAGE_WARN_PCT) return 'warning';
   return 'good';

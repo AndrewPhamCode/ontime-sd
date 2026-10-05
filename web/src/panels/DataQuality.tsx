@@ -8,9 +8,12 @@ const STATUS_COLOR = {
   good: 'var(--status-good)',
   warning: 'var(--status-warning)',
   critical: 'var(--status-critical)',
+  // A day whose coverage could not be measured reads as neutral, not as a
+  // problem and not as a success.
+  unknown: 'var(--ink-muted)',
 } as const;
 
-const STATUS_ICON = { good: '●', warning: '▲', critical: '■' } as const;
+const STATUS_ICON = { good: '●', warning: '▲', critical: '■', unknown: '○' } as const;
 
 /** The unflattering panel, shown rather than buried in a README.
  *
@@ -39,7 +42,14 @@ export function DataQuality() {
     );
   if (!data) return null;
 
-  const worstCoverage = Math.max(...data.coverage.map((d) => 100 - d.coverage_pct), 0);
+  // Days whose coverage could not be measured are left out of the worst case
+  // rather than counted as 100% lost.
+  const worstCoverage = Math.max(
+    ...data.coverage
+      .filter((d) => d.coverage_pct !== null && d.coverage_pct !== undefined)
+      .map((d) => 100 - (d.coverage_pct as number)),
+    0,
+  );
 
   return (
     <Card
@@ -64,7 +74,7 @@ export function DataQuality() {
               <div style={{ background: 'var(--grid)', borderRadius: 4, height: 16 }}>
                 <div
                   style={{
-                    width: `${Math.max(Math.min(day.coverage_pct, 100), 0)}%`,
+                    width: `${Math.max(Math.min(day.coverage_pct ?? 0, 100), 0)}%`,
                     height: '100%',
                     background: STATUS_COLOR[status],
                     borderRadius: 4,
@@ -75,7 +85,10 @@ export function DataQuality() {
                 <span aria-hidden="true" style={{ color: STATUS_COLOR[status] }}>
                   {STATUS_ICON[status]}
                 </span>{' '}
-                {day.coverage_pct.toFixed(0)}% · {day.hours_lost.toFixed(1)}h lost
+                {day.coverage_pct === null || day.coverage_pct === undefined
+                  ? 'coverage not measurable'
+                  : `${day.coverage_pct.toFixed(0)}%`}{' '}
+                · {day.hours_lost.toFixed(1)}h lost
               </span>
             </div>
           );

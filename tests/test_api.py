@@ -811,3 +811,34 @@ async def test_the_band_reaches_routes_and_distribution_too(
     # Seeded row is midday, so the morning band is empty on both endpoints.
     assert routes.json() == []
     assert dist.json() == []
+
+
+@pytest.mark.usefixtures("clean")
+async def test_a_day_with_one_poll_does_not_crash_data_quality(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    """Coverage is measured against the span from the first poll to the last.
+
+    With a single poll that span is zero, the query's nullif turns the division
+    into null, and the response model used to reject it with a 500. The panel
+    whose job is to admit what the data cannot support was the one endpoint that
+    fell over when the data was thin.
+    """
+    await _seed(db_pool)
+    await db_pool.execute(
+        """
+        insert into poll_log (feed, started_at, status, http_code, entity_count,
+                              rows_written, duration_ms)
+        values ('vehicle_positions', $1::timestamptz, 'ok', 200, 10, 10, 50)
+        """,
+        ARRIVED,
+    )
+
+    response = await client.get("/api/data-quality")
+
+    assert response.status_code == 200
+    days = response.json()["coverage"]
+    assert len(days) == 1
+    # Reported as unmeasurable rather than invented as 100%.
+    assert days[0]["coverage_pct"] is None
+    assert days[0]["successful_polls"] == 1

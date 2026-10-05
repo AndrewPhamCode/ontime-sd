@@ -255,7 +255,7 @@ export interface components {
             /** Hours Lost */
             hours_lost: number;
             /** Coverage Pct */
-            coverage_pct: number;
+            coverage_pct?: number | null;
         };
         /** DataQuality */
         DataQuality: {
@@ -292,6 +292,12 @@ export interface components {
              * @description Arrivals with a wider ping gap than this are excluded.
              */
             label_filter_seconds: number;
+            /**
+             * Time Band
+             * @description Time of day band these figures cover. Echoed back so the page can state which slice it is showing rather than implying all day.
+             * @default all
+             */
+            time_band: string;
         };
         /** LabelBand */
         LabelBand: {
@@ -615,6 +621,8 @@ export interface operations {
             query?: {
                 /** @description Widest GPS gap behind an arrival that still counts */
                 max_ping_gap?: number;
+                /** @description Time of day band, see TIME_BANDS */
+                time_band?: string;
             };
             header?: never;
             path?: never;
@@ -652,6 +660,8 @@ export interface operations {
                 max_ping_gap?: number;
                 /** @description Predictor to compare MTS against */
                 compare?: string;
+                /** @description Time of day band, see TIME_BANDS */
+                time_band?: string;
             };
             header?: never;
             path?: never;
@@ -685,6 +695,8 @@ export interface operations {
                 /** @description Horizon in minutes */
                 horizon?: number;
                 max_ping_gap?: number;
+                /** @description Time of day band, see TIME_BANDS */
+                time_band?: string;
             };
             header?: never;
             path?: never;
