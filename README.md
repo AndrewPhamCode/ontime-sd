@@ -1,9 +1,17 @@
 # OnTime SD
 
+**[Live site](https://d2ns6eg1tprflb.cloudfront.net)** · [Design decisions](DESIGN.md) · [Runbook](RUNBOOK.md)
+
 [![CI](https://github.com/AndrewPhamCode/ontime-sd/actions/workflows/ci.yml/badge.svg)](https://github.com/AndrewPhamCode/ontime-sd/actions/workflows/ci.yml)
+[![Deploy](https://github.com/AndrewPhamCode/ontime-sd/actions/workflows/deploy.yml/badge.svg)](https://github.com/AndrewPhamCode/ontime-sd/actions/workflows/deploy.yml)
 
 Real-time arrival predictions for San Diego MTS buses and trolleys, built to beat
 the agency's own ETAs.
+
+The live site runs on an EC2 instance that collects the GTFS-Realtime feed around
+the clock, with the React front end served by CloudFront from S3 and the API
+proxied through the same distribution, so there is one origin and no CORS. All of
+it is described in [infra/](infra/) as Terraform.
 
 ## The metric
 
@@ -21,11 +29,39 @@ reconstructed from GPS, MTS's own predictions have a mean absolute error of:
 | 10 minutes | **1.70 min** | 3.60 min |
 | 20 minutes | **2.23 min** | 4.85 min |
 
-That is the number to beat. A gradient boosted model now reaches **parity** with
-it, at 0.89 / 1.38 / 1.73 / 2.31 minutes, and does better on p90 at the longer
-horizons. It is not a win: differences of 2 to 4% on five days of data are inside
-the noise, and this project will not claim to beat MTS until there is enough data
-to say so.
+That is the number to beat.
+
+**It is now beaten at three of the four horizons.** Scored on identical rows over
+a time based split, training on 2026-09-28 to 09-30 and testing on 10-01 to 10-02:
+
+| Horizon | MTS | MTS, same post-processing | **Ours** | p90, MTS vs ours | n |
+| --- | --- | --- | --- | --- | --- |
+| 1 minute | 0.92 | 0.77 | **0.66** | 1.67 vs **1.10** | 49,537 |
+| 5 minutes | 1.37 | 1.34 | **1.25** | 2.85 vs **2.73** | 47,753 |
+| 10 minutes | 1.68 | 1.68 | **1.66** | 3.78 vs **3.50** | 45,274 |
+| 20 minutes | **2.16** | **2.16** | 2.22 | 5.08 vs **4.73** | 39,115 |
+
+Three things about that table are deliberate, because each one is a way the
+comparison could have been quietly rigged:
+
+- **Identical rows.** The model only produces a prediction where it has an anchor,
+  which is 77% of rows at the twenty minute horizon, and the rows it declines are
+  the hard ones near the start of a trip. Averaging MTS over all rows while
+  averaging the model over its own subset made the model look ahead at 10 and 20
+  minutes when on equal rows it was behind. See ADR-0043.
+- **The same post-processing on both sides.** Most of the model's gain comes from
+  refusing to predict an arrival in the past, which is knowably wrong when the
+  prediction is made. MTS's published predictions land in the past 15.5% of the
+  time at one minute out, so the third column applies the identical correction to
+  them. Against their raw output the claim would be 28%; against like-for-like it
+  is 14%. Both are stated. See ADR-0044.
+- **Twenty minutes is a loss, and is reported as one.** Closing it needs the live
+  vehicle position the agency has and this model is denied.
+
+The features that were *expected* to win contributed nothing, and ADR-0045 records
+that too: route level recent delay carries 0.12% of the model's gain and the
+training-range fix about 0.05 minutes. One feature, the sum of per-segment
+historical means, carries 90.5%.
 
 Read these as a preliminary sample rather than a published statistic. They come
 from five days at 35 to 70% collection coverage, there is no weekend data, and
