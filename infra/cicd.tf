@@ -27,10 +27,24 @@ data "aws_iam_policy_document" "github_assume" {
     }
 
     # Without this the role could be assumed from any repository on GitHub.
+    #
+    # The prefix is var.github_sub_prefix rather than "repo:${var.github_repo}"
+    # because this repository has GitHub's immutable subject claims enabled, so
+    # the token's sub carries the numeric owner and repository ids:
+    #
+    #   repo:AndrewPhamCode@151807689/ontime-sd@1393841749:ref:refs/heads/main
+    #
+    # Matching on the human readable name never fired, so every deploy failed at
+    # AssumeRoleWithWebIdentity with "Not authorized", while the provider, the
+    # audience and this policy all looked correct in the console. See ADR-0048.
+    #
+    # Pinning the immutable form is stricter than the name, not looser: a
+    # repository deleted and recreated under the same name gets a new id and
+    # cannot assume this role.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:ref:refs/heads/main"]
+      values   = ["${var.github_sub_prefix}:ref:refs/heads/main"]
     }
   }
 }

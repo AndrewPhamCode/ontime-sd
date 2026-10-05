@@ -2056,3 +2056,58 @@ This is the third time in this project that a thing which looked like success wa
 not: the leaked anchor in ADR-0038, the unmatched population in ADR-0043, and this.
 All three were found by checking the result against an independent source rather
 than by reading the code.
+
+## ADR-0048: The OIDC subject claim is not "repo:owner/name"
+
+**Status:** Accepted
+
+Every run of the deploy workflow failed at the same step, from the first one
+onwards, so the web application had never once been deployed by CI:
+
+```
+##[error]Could not assume role with OIDC:
+Not authorized to perform sts:AssumeRoleWithWebIdentity
+```
+
+Everything that usually causes this was correct and checked one at a time: the
+provider existed at the right URL, its `ClientIDList` held `sts.amazonaws.com`,
+the workflow granted `id-token: write`, the job declared no `environment:` (which
+would change the claim), and the role's trust policy read exactly
+
+```
+"token.actions.githubusercontent.com:sub": "repo:AndrewPhamCode/ontime-sd:ref:refs/heads/main"
+```
+
+The repository has GitHub's **immutable subject claims** enabled:
+
+```
+gh api /repos/AndrewPhamCode/ontime-sd/actions/oidc/customization/sub
+{"use_default":true,"use_immutable_subject":true,
+ "sub_claim_prefix":"repo:AndrewPhamCode@151807689/ontime-sd@1393841749"}
+```
+
+So the token's actual subject is
+
+```
+repo:AndrewPhamCode@151807689/ontime-sd@1393841749:ref:refs/heads/main
+```
+
+with the numeric owner id and repository id embedded. The condition matched on the
+human readable name and therefore never fired.
+
+**Decision.** Pin the immutable prefix, read from that endpoint, in
+`var.github_sub_prefix`. This is **stricter** than matching the name, which is why
+GitHub offers it: a repository deleted and recreated under the same name receives a
+new id and cannot assume the role. Matching `repo:owner/name` would have let a
+recreated repository inherit deploy access.
+
+`var.github_repo` was deleted rather than left in place. It no longer affected
+anything, and a variable that appears to control the trust policy while having no
+effect is how the next person loses an hour.
+
+**Why it took two failures to find.** The AWS side was entirely correct, so every
+console check passed and the error pointed at authorization rather than at a claim
+mismatch. The decisive evidence was not in AWS at all, it was one GitHub API call
+describing what the token would contain. The general lesson for a federated trust
+problem: read the claim the identity provider actually sends before auditing the
+policy that consumes it, because a policy can only be judged against a real token.

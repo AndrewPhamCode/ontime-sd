@@ -90,8 +90,17 @@ variable "monthly_budget_usd" {
   default     = "45"
 }
 
-variable "github_repo" {
-  description = "owner/name of the repository allowed to assume the deploy role."
+variable "github_sub_prefix" {
+  description = <<-DESC
+    Prefix of the OIDC subject claim GitHub actually sends, which is NOT
+    "repo:owner/name" when immutable subject claims are enabled on the
+    repository. Read it from:
+
+      gh api /repos/<owner>/<name>/actions/oidc/customization/sub
+
+    and use the sub_claim_prefix it returns verbatim. The numeric ids are the
+    owner id and the repository id.
+  DESC
   type        = string
-  default     = "AndrewPhamCode/ontime-sd"
+  default     = "repo:AndrewPhamCode@151807689/ontime-sd@1393841749"
 }

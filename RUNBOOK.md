@@ -448,3 +448,49 @@ recollected. Removing it is a conscious act, after a snapshot.
 - A service day is inferred from the observation time when the feed omits
   `start_date`, which is wrong for a trip observed after midnight that began the
   previous service day. Phase 2 provides the schedules needed to fix it.
+
+### The deploy workflow cannot assume its role
+
+Symptom, at the "Assume the deploy role" step, on every run:
+
+    Could not assume role with OIDC:
+    Not authorized to perform sts:AssumeRoleWithWebIdentity
+
+Check the claim GitHub actually sends BEFORE auditing anything in AWS:
+
+    gh api /repos/AndrewPhamCode/ontime-sd/actions/oidc/customization/sub
+
+If `use_immutable_subject` is true, the `sub_claim_prefix` it returns carries
+numeric owner and repository ids and will not equal `repo:owner/name`. The trust
+policy has to match the prefix verbatim. Put it in `infra/terraform.tfvars`:
+
+    github_sub_prefix = "repo:<owner>@<owner_id>/<name>@<repo_id>"
+
+then apply and re-run the workflow without needing a new commit:
+
+    make infra-apply
+    gh workflow run deploy.yml
+
+Confirm the role is what you think it is:
+
+    aws iam get-role --role-name ontime-sd-github-deploy --profile ontime \
+      --query 'Role.AssumeRolePolicyDocument'
+
+The AWS side being correct is the trap here. The provider, its audience list and
+the policy all read fine in the console while the claim never matched. See
+ADR-0048.
+
+### aws login puts you on the root user
+
+`aws login` writes `login_session` into the profile it used, so authenticating as
+root once pins that profile to root, and every later `--profile ontime` silently
+reuses it. `aws sts get-caller-identity --profile ontime` is the only way to know
+which identity you actually hold.
+
+    aws logout --profile ontime
+    # ~/.aws/config, under [profile ontime]:
+    #   login_session = arn:aws:iam::611955806928:user/ontime-deploy
+    aws login --profile ontime
+
+Leave `[default]` with no `login_session`, so a bare `aws login` cannot pick root
+without being asked. Root is for billing and closing the account, nothing here.
