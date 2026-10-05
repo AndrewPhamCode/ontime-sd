@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULTS,
   STORAGE_KEY,
+  TIME_BAND_KEYS,
+  TIME_BAND_LABELS,
   coerceSettings,
   isModified,
   readStored,
@@ -127,5 +129,38 @@ describe('weakenedBy', () => {
         refreshMs: 0,
       }),
     ).toEqual([]);
+  });
+});
+
+describe('time of day band', () => {
+  it('defaults to all day, so a fresh viewer sees the whole result', () => {
+    expect(DEFAULTS.timeBand).toBe('all');
+  });
+
+  it('falls back to all day when a stored band is unknown', () => {
+    // A band removed in a later version must not white-screen the app or, worse,
+    // silently keep filtering by a key the API will reject with a 422.
+    expect(coerceSettings({ ...DEFAULTS, timeBand: 'siesta' }).timeBand).toBe('all');
+  });
+
+  it('keeps a valid stored band', () => {
+    expect(coerceSettings({ ...DEFAULTS, timeBand: 'pm_rush' }).timeBand).toBe('pm_rush');
+  });
+
+  it('counts as modified, so the app bar marks a filtered view', () => {
+    // A screenshot of PM rush numbers must not be mistakable for the all-day
+    // result, which is the same honesty requirement the other settings carry.
+    expect(isModified({ ...DEFAULTS, timeBand: 'pm_rush' })).toBe(true);
+    expect(isModified(DEFAULTS)).toBe(false);
+  });
+
+  it('is not treated as a weakening, because a slice is not a looser filter', () => {
+    expect(weakenedBy({ ...DEFAULTS, timeBand: 'pm_rush' })).toEqual([]);
+  });
+
+  it('has a label for every key', () => {
+    for (const key of TIME_BAND_KEYS) {
+      expect(TIME_BAND_LABELS[key]).toBeTruthy();
+    }
   });
 });

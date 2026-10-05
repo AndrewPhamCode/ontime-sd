@@ -5,14 +5,38 @@
 -- 2026-10-01 to 10-02; the model and the segment statistics saw nothing after
 -- 2026-09-30. See DESIGN.md ADR-0038.
 
+-- Averaging each source over its own rows is not a head to head. The model only
+-- predicts where an anchor exists, 77% of rows at the 20 minute horizon, and the
+-- rows it skips are the hard ones near the start of a trip. Matching the
+-- population is what makes the comparison mean anything. See ADR-0043.
 \echo '== HEAD TO HEAD: mean absolute error in minutes, test window only =='
-\echo '   comparable subset, well observed arrivals (ping gap <= 3 min)'
+\echo '   matched rows only: every source predicted the same arrivals'
+with matched as (
+    select start_date, trip_id, stop_sequence, horizon_minutes
+    from prediction_errors
+    where start_date between '2026-10-01' and '2026-10-02'
+      and has_all_horizons and ping_gap_seconds <= 180
+    group by 1, 2, 3, 4
+    having count(distinct source) = 4
+)
 select horizon_minutes || ' min' as horizon,
        round(avg(abs_error_seconds) filter (where source='mts')/60.0, 2)           as mts,
        round(avg(abs_error_seconds) filter (where source='persist_delay')/60.0, 2) as persist_delay,
        round(avg(abs_error_seconds) filter (where source='segment_mean')/60.0, 2)  as segment_mean,
        round(avg(abs_error_seconds) filter (where source='lgbm')/60.0, 2)          as lgbm,
        count(*) filter (where source='mts')                                        as n
+from prediction_errors pe
+join matched using (start_date, trip_id, stop_sequence, horizon_minutes)
+group by horizon_minutes
+order by horizon_minutes;
+
+\echo ''
+\echo '== coverage: rows each source predicted, before matching =='
+select horizon_minutes || ' min' as horizon,
+       count(*) filter (where source='mts')  as mts_rows,
+       count(*) filter (where source='lgbm') as lgbm_rows,
+       round(100.0 * count(*) filter (where source='lgbm')
+             / nullif(count(*) filter (where source='mts'), 0), 1) as lgbm_coverage_pct
 from prediction_errors
 where start_date between '2026-10-01' and '2026-10-02'
   and has_all_horizons and ping_gap_seconds <= 180

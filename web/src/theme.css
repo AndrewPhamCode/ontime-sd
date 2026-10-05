@@ -703,8 +703,16 @@ body,
   }
 }
 
-/* MapLibre popups should match the app rather than the library default. */
-.maplibregl-popup-content {
+/* MapLibre popups should match the app rather than the library default.
+ *
+ * Scoped under .maplibregl-popup deliberately. The library's own rule is a bare
+ * .maplibregl-popup-content, so a bare selector here only wins when it is
+ * ordered later, and it is not: theme.css is imported in main.tsx while
+ * maplibre-gl.css arrives through MapView, so the library sheet lands second
+ * and takes the cascade. That left background at #fff while color stayed
+ * var(--ink), which is white in dark mode, so a hover showed a blank white box.
+ * Two classes beat one regardless of import order. */
+.maplibregl-popup .maplibregl-popup-content {
   background: var(--surface);
   color: var(--ink);
   border: 1px solid var(--border);
@@ -714,7 +722,7 @@ body,
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
 }
 
-.maplibregl-popup-tip {
+.maplibregl-popup .maplibregl-popup-tip {
   display: none;
 }
 

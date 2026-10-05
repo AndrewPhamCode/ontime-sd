@@ -8,6 +8,8 @@ import {
   PLACE_KEYS,
   REFRESH_CHOICES,
   SAMPLE_CHOICES,
+  TIME_BAND_KEYS,
+  TIME_BAND_LABELS,
   isModified,
   weakenedBy,
 } from './settings';
@@ -135,6 +137,25 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               {(['lgbm', 'segment_mean', 'persist_delay'] as const).map((value) => (
                 <option key={value} value={value}>
                   {SOURCE_LABELS[value]}
+                </option>
+              ))}
+            </select>
+          </Row>
+
+          <Row
+            label="Time of day"
+            cost="A band is a slice of the day, not the whole result. PM rush is the hardest slice for both predictors."
+            isDefault={settings.timeBand === DEFAULTS.timeBand}
+          >
+            <select
+              value={settings.timeBand}
+              onChange={(event) =>
+                set('timeBand', event.target.value as typeof settings.timeBand)
+              }
+            >
+              {TIME_BAND_KEYS.map((value) => (
+                <option key={value} value={value}>
+                  {TIME_BAND_LABELS[value]}
                 </option>
               ))}
             </select>

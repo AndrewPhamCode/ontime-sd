@@ -7,6 +7,7 @@ const params = {
   minSample: DEFAULTS.minSample,
   labelFilter: DEFAULTS.labelFilter,
   compare: DEFAULTS.compare,
+  timeBand: DEFAULTS.timeBand,
 };
 
 /** Capture the URL a client method requests, without a server. */
@@ -67,5 +68,25 @@ describe('api query strings', () => {
     const { urls } = capture();
     await api.upcoming('a b/c', params);
     expect(urls[0]).toContain('a%20b%2Fc');
+  });
+});
+
+describe('time of day band', () => {
+  it('sends the band on every endpoint whose numbers it changes', async () => {
+    const { urls } = capture();
+    await api.headline({ ...params, timeBand: 'pm_rush' });
+    await api.routes({ ...params, timeBand: 'pm_rush' });
+    await api.distribution({ ...params, timeBand: 'pm_rush' });
+    expect(urls).toHaveLength(3);
+    for (const url of urls) expect(url).toContain('time_band=pm_rush');
+  });
+
+  it('sends the default band rather than omitting the parameter', async () => {
+    // Omitting it would work, since the API defaults to all day, but then the
+    // request for all-day numbers and the request for a band would differ in
+    // shape rather than in one value, which is harder to read in a network log.
+    const { urls } = capture();
+    await api.headline(params);
+    expect(urls[0]).toContain('time_band=all');
   });
 });

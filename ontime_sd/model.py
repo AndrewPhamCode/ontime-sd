@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
@@ -26,13 +27,16 @@ import numpy as np
 
 from ontime_sd.config import SERVICE_TZ
 from ontime_sd.features import (
+    CATEGORICAL_FEATURES,
     FEATURE_NAMES,
     Context,
     build_matrix,
+    build_route_index,
     load_evaluation_contexts,
     load_training_contexts,
     segment_sum,
 )
+from ontime_sd.network_state import load_route_conditions
 from ontime_sd.segments import SegmentMeans, fit_segment_stats, load_segment_means
 
 log = logging.getLogger(__name__)
@@ -59,6 +63,35 @@ LGBM_PARAMS = {
     "num_threads": 4,
 }
 LGBM_ROUNDS = 300
+# Upper bound only. The round count is chosen by early stopping on a time ordered
+# validation split; this is the ceiling it searches under.
+LGBM_MAX_ROUNDS = 2000
+LGBM_EARLY_STOPPING = 50
+
+# Ablation switch. Set ONTIME_NO_CLAMP=1 to score the raw model output, which is
+# how the clamp's contribution was separated from the features'. Kept because a
+# result nobody can decompose is a result nobody should trust.
+CLAMP_TO_CUTOFF = os.environ.get("ONTIME_NO_CLAMP") != "1"
+
+
+def _clamp_to_cutoff(context: Context, remaining_seconds: float) -> datetime:
+    """Arrival time from a predicted travel time, never earlier than the cutoff.
+
+    The model forecasts travel time from the anchor, and the anchor is already in
+    the past at prediction time, so an underestimate can place the arrival before
+    the moment of prediction. That prediction is knowably wrong when it is made: a
+    bus that has not arrived yet cannot have arrived already. 13.9% of predictions
+    at the one minute horizon landed in the past before this clamp.
+
+    Uses only the cutoff, which is known at prediction time, so it buys nothing
+    the deployed system would not also have.
+    """
+    arrival = context.anchor_arrived_at + timedelta(seconds=max(remaining_seconds, 0.0))
+    if not CLAMP_TO_CUTOFF:
+        return arrival
+    cutoff = context.prediction_instant
+    return max(arrival, cutoff)
+
 
 _INSERT_SQL = """
 insert into prediction_errors (
@@ -87,7 +120,18 @@ join unnest($2::date[], $3::text[], $4::int[], $5::int[], $6::timestamptz[])
  and p.stop_sequence = base.stop_sequence
  and p.horizon_minutes = base.horizon_minutes
 where base.source = 'mts'
-on conflict do nothing
+-- Upsert, not DO NOTHING. These rows are the output of a model that gets
+-- retrained, so a second run has to replace the first run's scores. With DO
+-- NOTHING the insert reported zero rows written and `make compare` kept printing
+-- the previous model's numbers, which is the worst possible failure here: it
+-- looks like success and silently reports a stale result as a new one.
+on conflict (start_date, trip_id, stop_sequence, horizon_minutes, source)
+do update set
+    predicted_arrival = excluded.predicted_arrival,
+    predicted_at      = excluded.predicted_at,
+    error_seconds     = excluded.error_seconds,
+    abs_error_seconds = excluded.abs_error_seconds,
+    computed_at       = now()
 """
 
 
@@ -217,6 +261,13 @@ async def run_phase5(
         train_stops = await load_trip_stops(conn, train_from, train_to)
         test_stops = await load_trip_stops(conn, test_from, test_to)
 
+        # Spans both windows deliberately. Unlike the segment means this is not a
+        # statistic fitted on history, it is a reading of conditions taken at each
+        # cutoff from observations that had already closed, so a test-window bucket
+        # contains nothing a prediction at that instant could not have seen. See
+        # ontime_sd/network_state.py.
+        conditions = await load_route_conditions(conn, train_from, test_to)
+
     log.info(
         "contexts loaded",
         extra={"train_rows": len(train_contexts), "test_rows": len(test_contexts)},
@@ -237,23 +288,68 @@ async def run_phase5(
 
     # --- the model ---
 
-    x_train, y_train = build_matrix(train_contexts, train_stops, means)
-    usable = ~np.isnan(y_train)
-    x_train, y_train = x_train[usable], y_train[usable]
+    route_index = build_route_index(train_contexts)
 
+    # Time ordered, because the validation split has to respect the same arrow of
+    # time the train/test split does. A random 20% would let the model pick its
+    # round count using the afternoon to judge the morning.
+    ordered = sorted(train_contexts, key=lambda c: c.anchor_arrived_at)
+    boundary = int(len(ordered) * 0.8)
+    fit_contexts, valid_contexts = ordered[:boundary], ordered[boundary:]
+
+    def matrix(contexts: list[Context]) -> tuple[np.ndarray, np.ndarray]:
+        x, y = build_matrix(contexts, train_stops, means, conditions, route_index)
+        usable = ~np.isnan(y)
+        return x[usable], y[usable]
+
+    x_fit, y_fit = matrix(fit_contexts)
+    x_valid, y_valid = matrix(valid_contexts)
+
+    categorical = [FEATURE_NAMES.index(name) for name in CATEGORICAL_FEATURES]
+    dataset_args = {"feature_name": list(FEATURE_NAMES), "categorical_feature": categorical}
+
+    # Find the round count on the validation split rather than fixing it at 300.
+    # A fixed count is either leaving accuracy on the table or overfitting, and
+    # which one it is cannot be known without measuring.
+    probe = lgb.train(
+        LGBM_PARAMS,
+        lgb.Dataset(x_fit, label=y_fit, **dataset_args),
+        num_boost_round=LGBM_MAX_ROUNDS,
+        valid_sets=[lgb.Dataset(x_valid, label=y_valid, **dataset_args)],
+        callbacks=[lgb.early_stopping(LGBM_EARLY_STOPPING, verbose=False)],
+    )
+    best_rounds = probe.best_iteration or LGBM_ROUNDS
+    log.info("round count chosen", extra={"best_rounds": best_rounds})
+
+    # Refit on the whole training window at that round count, so the final model
+    # sees the most recent training day instead of holding it back.
+    x_train, y_train = matrix(train_contexts)
     booster = lgb.train(
         LGBM_PARAMS,
-        lgb.Dataset(x_train, label=y_train, feature_name=list(FEATURE_NAMES)),
-        num_boost_round=LGBM_ROUNDS,
+        lgb.Dataset(x_train, label=y_train, **dataset_args),
+        num_boost_round=best_rounds,
     )
 
-    x_test, _ = build_matrix(test_contexts, test_stops, means)
+    # Logged because a feature that contributes nothing should be removed rather
+    # than left in looking like work. Gain, not split count: split count rewards
+    # high cardinality features for being easy to split on.
+    log.info(
+        "feature importance by gain",
+        extra={
+            "importance": {
+                name: round(float(value), 1)
+                for name, value in sorted(
+                    zip(FEATURE_NAMES, booster.feature_importance("gain"), strict=True),
+                    key=lambda pair: -pair[1],
+                )
+            }
+        },
+    )
+
+    x_test, _ = build_matrix(test_contexts, test_stops, means, conditions, route_index)
     remaining = booster.predict(x_test)
     lgbm = [
-        Prediction(
-            context,
-            context.anchor_arrived_at + timedelta(seconds=max(float(seconds), 0.0)),
-        )
+        Prediction(context, _clamp_to_cutoff(context, float(seconds)))
         for context, seconds in zip(test_contexts, remaining, strict=True)
     ]
 

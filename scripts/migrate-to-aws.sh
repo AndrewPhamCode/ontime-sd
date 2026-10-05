@@ -33,7 +33,7 @@ TABLES=(feed_versions poll_log vehicle_positions predictions)
 
 echo "==> checking both ends"
 psql "$LOCAL_URL" -tAc 'select 1' >/dev/null
-ssh "$HOST" 'docker exec ontime-sd-postgres pg_isready -U ontime -d ontime_sd' >/dev/null
+ssh "$HOST" 'sudo -n docker exec ontime-sd-postgres pg_isready -U ontime -d ontime_sd' >/dev/null
 echo "    local and remote databases both reachable"
 
 echo "==> local row counts"
@@ -50,37 +50,61 @@ echo "==> shipping"
 scp -q "$DUMP" "$HOST:/tmp/ontime-migrate.dump"
 
 echo "==> restoring into staging database on the remote host"
-ssh "$HOST" bash -se <<REMOTE
+
+# The remote half is shipped as a FILE and executed, not piped to `bash -s`.
+#
+# It used to arrive on stdin as a heredoc. `docker exec -i` inherits stdin, so
+# the first psql call consumed the rest of the script, bash ran out of input,
+# and the migration exited 0 having moved nothing while printing its own
+# success banner. The cloud database still held two days when this claimed to
+# have shipped five. A file cannot be eaten by a command that reads stdin.
+REMOTE_SCRIPT="$(mktemp -t ontime-migrate-remote)"
+trap 'rm -f "$REMOTE_SCRIPT"' EXIT
+
+cat > "$REMOTE_SCRIPT" <<'REMOTE_EOF'
+#!/usr/bin/env bash
+# Runs on the collector host. Arguments: <staging-db> <table>...
 set -euo pipefail
-C() { docker exec -i ontime-sd-postgres "\$@"; }
+
+STAGING="$1"; shift
+TABLES=("$@")
+
+# ec2-user is deliberately not in the docker group. It already has passwordless
+# sudo, so adding it would widen nothing and is one more thing to keep true
+# across instance replacements.
+C() { sudo -n docker exec -i ontime-sd-postgres "$@"; }
 
 C psql -U ontime -d postgres -q -c "drop database if exists $STAGING" 2>/dev/null || true
 C psql -U ontime -d postgres -q -c "create database $STAGING"
-C pg_restore -U ontime -d $STAGING --no-owner --no-privileges < /tmp/ontime-migrate.dump
+C pg_restore -U ontime -d "$STAGING" --no-owner --no-privileges < /tmp/ontime-migrate.dump
 echo "    staging restored"
 
-for t in ${TABLES[*]}; do
-  before=\$(C psql -U ontime -d ontime_sd -tAc "select count(*) from \$t")
+for t in "${TABLES[@]}"; do
+  before=$(C psql -U ontime -d ontime_sd -tAc "select count(*) from $t")
 
   # psql meta-commands cannot be mixed into a -c string alongside SQL, so the
   # rows go through a CSV inside the container and the merge runs as a script on
-  # stdin, where \\copy works and the temp table survives the whole session.
-  C psql -U ontime -d $STAGING -q -c "\\copy (select * from \$t) to '/tmp/mig_\$t.csv' csv"
+  # stdin, where \copy works and the temp table survives the whole session.
+  C psql -U ontime -d "$STAGING" -q -c "\copy (select * from $t) to '/tmp/mig_$t.csv' csv"
   C psql -U ontime -d ontime_sd -q -v ON_ERROR_STOP=1 <<SQL
-create temp table _m (like \$t including defaults);
-\\copy _m from '/tmp/mig_\$t.csv' csv
-insert into \$t select * from _m on conflict do nothing;
+create temp table _m (like $t including defaults);
+\copy _m from '/tmp/mig_$t.csv' csv
+insert into $t select * from _m on conflict do nothing;
 SQL
-  C rm -f "/tmp/mig_\$t.csv"
+  C rm -f "/tmp/mig_$t.csv"
 
-  after=\$(C psql -U ontime -d ontime_sd -tAc "select count(*) from \$t")
-  printf '    %-20s %s -> %s\n' "\$t" "\$before" "\$after"
+  after=$(C psql -U ontime -d ontime_sd -tAc "select count(*) from $t")
+  printf '    %-20s %s -> %s\n' "$t" "$before" "$after"
 done
 
 C psql -U ontime -d postgres -q -c "drop database $STAGING"
 rm -f /tmp/ontime-migrate.dump
 echo "    staging dropped"
-REMOTE
+REMOTE_EOF
+
+scp -q "$REMOTE_SCRIPT" "$HOST:/tmp/ontime-migrate-remote.sh"
+# </dev/null so nothing remote can read this shell's stdin either.
+ssh "$HOST" "bash /tmp/ontime-migrate-remote.sh $STAGING ${TABLES[*]}" </dev/null
 
 rm -f "$DUMP"
 
@@ -93,7 +117,7 @@ cat <<NOTES
 
 Both collectors are still running. Check the cloud one has the history:
 
-    ssh $HOST 'docker exec ontime-sd-postgres psql -U ontime -d ontime_sd -c "select min(ts), max(ts), count(*) from vehicle_positions"'
+    ssh $HOST 'sudo -n docker exec ontime-sd-postgres psql -U ontime -d ontime_sd -c "select min(ts), max(ts), count(*) from vehicle_positions"'
 
 Once that looks right, stop the laptop agents so collection is not split:
 

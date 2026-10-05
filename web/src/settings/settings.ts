@@ -19,6 +19,32 @@ export const SAMPLE_CHOICES = [1, 5, 10, 30, 100] as const;
 export const LABEL_FILTER_CHOICES = [60, 180, 600, 900] as const;
 export const REFRESH_CHOICES = [5_000, 10_000, 30_000, 0] as const;
 
+/** Time of day bands, matching ontime_sd/api.py TIME_BANDS exactly.
+ *
+ *  The order here is the order they appear in the panel, and 'late' sits last
+ *  because it wraps past midnight. These keys are sent verbatim as the
+ *  time_band query parameter, so a rename here needs the same rename there; the
+ *  API answers 422 rather than silently returning all-day numbers if they drift.
+ */
+export const TIME_BAND_KEYS = [
+  'all',
+  'am_rush',
+  'midday',
+  'pm_rush',
+  'evening',
+  'late',
+] as const;
+export type TimeBandKey = (typeof TIME_BAND_KEYS)[number];
+
+export const TIME_BAND_LABELS: Record<TimeBandKey, string> = {
+  all: 'All day',
+  am_rush: 'AM rush (6am to 9am)',
+  midday: 'Midday (9am to 3pm)',
+  pm_rush: 'PM rush (3pm to 7pm)',
+  evening: 'Evening (7pm to midnight)',
+  late: 'Late night (midnight to 6am)',
+};
+
 export interface Settings {
   /** Which horizon's measured bias drives the live correction. */
   horizon: number;
@@ -28,6 +54,8 @@ export interface Settings {
   labelFilter: number;
   /** Which predictor is shown beside MTS. */
   compare: SourceKey;
+  /** Which part of the service day every scored figure covers. */
+  timeBand: TimeBandKey;
 
   place: PlaceKey;
   /** Vehicle poll interval in ms; 0 means do not poll. */
@@ -42,6 +70,7 @@ export const DEFAULTS: Settings = {
   minSample: 10,
   labelFilter: 180,
   compare: 'lgbm',
+  timeBand: 'all',
   place: 'ucsd',
   refreshMs: 10_000,
   showVehicles: true,
@@ -75,6 +104,7 @@ export function coerceSettings(raw: unknown): Settings {
     minSample: oneOf(SAMPLE_CHOICES, input['minSample'], DEFAULTS.minSample),
     labelFilter: oneOf(LABEL_FILTER_CHOICES, input['labelFilter'], DEFAULTS.labelFilter),
     compare: oneOf(SOURCE_KEYS, input['compare'], DEFAULTS.compare),
+    timeBand: oneOf(TIME_BAND_KEYS, input['timeBand'], DEFAULTS.timeBand),
     place: oneOf(PLACE_KEYS, input['place'], DEFAULTS.place),
     refreshMs: oneOf(REFRESH_CHOICES, input['refreshMs'], DEFAULTS.refreshMs),
     showVehicles: bool(input['showVehicles'], DEFAULTS.showVehicles),
