@@ -2111,3 +2111,77 @@ mismatch. The decisive evidence was not in AWS at all, it was one GitHub API cal
 describing what the token would contain. The general lesson for a federated trust
 problem: read the claim the identity provider actually sends before auditing the
 policy that consumes it, because a policy can only be judged against a real token.
+
+## ADR-0049: Training does not run on the collection host
+
+**Status:** Accepted
+
+`ontime-model` was run on the t4g.small that collects the feed. It consumed the
+instance's 1,840 MB until the kernel could not schedule anything: SSH timed out,
+`/healthz` timed out through CloudFront, and the SSM agent never picked up a
+command, leaving it `Pending`. EC2 still reported `running / ok / ok` and CPU at
+54%, because the hypervisor could see nothing wrong.
+
+It did not get OOM killed cleanly. It starved the box, and the box took roughly
+ten minutes of collection down with it. Realtime data cannot be backfilled, so
+that is a permanent hole. Recovery was `aws ec2 reboot-instances`; the data volume
+is separate and Postgres is crash safe, so all 2.45M scored rows survived.
+
+**Decision.** The collection host never trains. It collects, serves the API, and
+runs the two cheap derived steps. Training happens where the data already is, and
+only the results are shipped up.
+
+**Why not simply give it more memory.** A `t4g.medium` would let this particular
+run finish, which is the trap: the collector would still be sharing a box with a
+job whose appetite grows with the dataset, and the dataset grows every day. The
+failure would return later, larger, and probably at 3am during an unattended
+retrain, with the watchdog unable to reach anything to report it. Sampling the
+training rows down has the same shape, and additionally degrades the model to fit
+the hardware.
+
+**What makes shipping results sound.** Arrival inference is deterministic given
+the same GPS. A 60,000 row sample of `(trip_id, stop_sequence, horizon, arrived_at)`
+for 2026-10-01 was compared across both hosts: 60,000 matched keys, 60,000
+identical arrival times, mean absolute difference 0.00s. So predictions made
+against the laptop's anchors are scored against the same ground truth on the
+cloud. That check is the precondition, not a formality: without it, the two sides
+would be comparing predictions to different truths.
+
+The cloud legitimately holds **more** arrivals for the same window, 761,379 scored
+rows against the laptop's 622,569, because it has both collectors' GPS merged and
+the overlap fills gaps. So the model's coverage there is a subset, which is
+precisely why ADR-0050 had to be done first.
+
+## ADR-0050: The matched population belongs in the API, not only in compare.sql
+
+**Status:** Accepted
+
+ADR-0043 fixed `compare.sql` to score every source over identical rows. The API
+was never fixed, so `/api/headline` and `/api/routes` still averaged each source
+over its own rows. Nobody noticed because the cloud had no model, so there was
+only one source and nothing to mismatch.
+
+Shipping the model's rows up would have made the live site state the flattering
+comparison the README explicitly promises it avoids: MTS over 761,379 rows against
+the model over 492,541, with the model declining the hard ones.
+
+**Decision.** Both endpoints restrict to arrivals every present source predicted.
+`present` counts the distinct sources in the window rather than hardcoding 4, so
+the restriction is a no op when only MTS is loaded. Hardcoding 4 would have
+blanked the page on any deployment without a model run, which is the state a fresh
+deployment is in.
+
+**The subtlety, found by a test rather than by reading.** The first version
+computed the matched population *inside* the time of day filter. A band holding
+rows from only one source then matched a different population from all day, and
+the per band counts stopped summing to the total: 2 against 1 in the fixture. The
+matched population is a property of the data, so it is now computed over the
+window and the band is applied afterwards, to a subset of one fixed population.
+The partition test from ADR-0046 is what caught it, which is the argument for
+asserting an invariant rather than a value.
+
+`compare.sql`'s per route section had the same gap and was also still unmatched:
+it reported route 992 at n=389, MTS 3.30, ours 2.39 where the matched figures are
+n=363, 3.20 and 2.40. The per route table is where someone looks to find where the
+model wins, so it is the last place that should be scored on a population the
+model never had to attempt.

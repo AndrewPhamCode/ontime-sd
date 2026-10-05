@@ -732,23 +732,30 @@ async def test_bands_partition_the_all_day_population(
     """The property the exhaustiveness test asserts in the abstract, over real rows."""
     await _seed(db_pool)
     # A second arrival in the evening, so more than one band is populated.
-    await db_pool.execute(
-        """
-        insert into prediction_errors (
-            start_date, trip_id, stop_sequence, horizon_minutes, source,
-            feed_version, stop_id, route_id, arrived_at, predicted_arrival,
-            predicted_at, error_seconds, abs_error_seconds, ping_gap_seconds,
-            service_minute, is_weekend, has_all_horizons)
-        values ($1::date,'trip-1',4,10,'mts',$2::text,'stop-A','route-9',
-                $3::timestamptz, $3::timestamptz,
-                -- The schema enforces that a prediction precedes its own cutoff.
-                $3::timestamptz - interval '10 minutes', 0, 0, 30,
-                1200, false, true)
-        """,
-        DAY_TEST,
-        VERSION,
-        ARRIVED,
-    )
+    #
+    # Seeded for BOTH sources on purpose. The headline scores a matched
+    # population (ADR-0043), so an arrival only one source predicted is excluded
+    # and would not appear in any band, which is the behaviour the next test
+    # pins rather than something to work around here.
+    for source in ("mts", "lgbm"):
+        await db_pool.execute(
+            """
+            insert into prediction_errors (
+                start_date, trip_id, stop_sequence, horizon_minutes, source,
+                feed_version, stop_id, route_id, arrived_at, predicted_arrival,
+                predicted_at, error_seconds, abs_error_seconds, ping_gap_seconds,
+                service_minute, is_weekend, has_all_horizons)
+            values ($1::date,'trip-1',4,10,$4::text,$2::text,'stop-A','route-9',
+                    $3::timestamptz, $3::timestamptz,
+                    -- The schema enforces that a prediction precedes its own cutoff.
+                    $3::timestamptz - interval '10 minutes', 0, 0, 30,
+                    1200, false, true)
+            """,
+            DAY_TEST,
+            VERSION,
+            ARRIVED,
+            source,
+        )
 
     def mts_at_ten(body: dict) -> int:
         rows = [
@@ -842,3 +849,48 @@ async def test_a_day_with_one_poll_does_not_crash_data_quality(
     # Reported as unmeasurable rather than invented as 100%.
     assert days[0]["coverage_pct"] is None
     assert days[0]["successful_polls"] == 1
+
+
+@pytest.mark.usefixtures("clean")
+async def test_the_headline_excludes_arrivals_only_one_source_predicted(
+    client: httpx.AsyncClient, db_pool: asyncpg.Pool
+) -> None:
+    """ADR-0043, enforced at the endpoint rather than only in compare.sql.
+
+    Our predictors only score where an anchor existed, which on real data is 77%
+    of rows at the twenty minute horizon, and the rows they decline are the hard
+    ones near the start of a trip. Averaging MTS over all rows while averaging the
+    model over its own subset charged MTS for cases the model never attempted.
+    """
+    await _seed(db_pool)
+    before = (await client.get("/api/headline")).json()
+    n_before = next(
+        r["n"] for r in before["rows"] if r["source"] == "mts" and r["horizon_minutes"] == 10
+    )
+
+    # An arrival MTS predicted and the model did not.
+    await db_pool.execute(
+        """
+        insert into prediction_errors (
+            start_date, trip_id, stop_sequence, horizon_minutes, source,
+            feed_version, stop_id, route_id, arrived_at, predicted_arrival,
+            predicted_at, error_seconds, abs_error_seconds, ping_gap_seconds,
+            service_minute, is_weekend, has_all_horizons)
+        values ($1::date,'trip-1',9,10,'mts',$2::text,'stop-A','route-9',
+                $3::timestamptz, $3::timestamptz,
+                $3::timestamptz - interval '10 minutes', 600, 600, 30,
+                720, false, true)
+        """,
+        DAY_TEST,
+        VERSION,
+        ARRIVED,
+    )
+
+    after = (await client.get("/api/headline")).json()
+    n_after = next(
+        r["n"] for r in after["rows"] if r["source"] == "mts" and r["horizon_minutes"] == 10
+    )
+
+    # The unmatched row must not inflate MTS's population, and since its error is
+    # large it would also have worsened MTS's average for free.
+    assert n_after == n_before

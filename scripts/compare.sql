@@ -74,14 +74,24 @@ order by avg(abs_error_seconds);
 
 \echo ''
 \echo '== where do we beat MTS, and where not? 10 minute horizon by route =='
-with per_route as (
+-- Matched here too. This section was left unmatched when the head to head
+-- above was fixed, and it reported route 992 at n=389, mts 3.30, lgbm 2.39
+-- where the matched figures are n=363, mts 3.20, lgbm 2.40. Per route is where
+-- someone looks to find where the model wins, so it is the last place that
+-- should be scored on a population the model did not have to attempt.
+with scoped as (
+  select * from prediction_errors
+  where horizon_minutes = 10 and start_date between '2026-10-01' and '2026-10-02'
+    and has_all_horizons and ping_gap_seconds <= 180),
+matched_route as (
+  select start_date, trip_id, stop_sequence, horizon_minutes
+  from scoped group by 1, 2, 3, 4 having count(distinct source) = 4),
+per_route as (
   select route_id,
          avg(abs_error_seconds) filter (where source='mts') as mts,
          avg(abs_error_seconds) filter (where source='lgbm') as lgbm,
          count(*) filter (where source='mts') as n
-  from prediction_errors
-  where horizon_minutes = 10 and start_date between '2026-10-01' and '2026-10-02'
-    and has_all_horizons and ping_gap_seconds <= 180
+  from scoped join matched_route using (start_date, trip_id, stop_sequence, horizon_minutes)
   group by route_id having count(*) filter (where source='mts') >= 150)
 select route_id, n,
        round(mts/60.0, 2) as mts_min,

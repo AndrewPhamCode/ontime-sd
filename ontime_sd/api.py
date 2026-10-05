@@ -490,8 +490,37 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
         async def produce() -> Headline:
             win = await resolve_window()
             band_sql, band_args = time_band_clause(time_band, 4)
+            # Matched population, for the reason ADR-0043 records: averaging each
+            # source over its own rows is not a comparison. Our predictors only
+            # score where an anchor existed, and the rows they decline are the
+            # hard ones, so MTS gets charged for cases they never attempted.
+            #
+            # `present` makes this degrade correctly rather than needing a
+            # special case. With only MTS loaded, one source is present, every
+            # key has one source, and the restriction is a no-op. With all four
+            # loaded it becomes the full intersection. Hardcoding 4 would have
+            # emptied the page whenever a model had not been run yet, which is
+            # exactly the state a fresh deployment is in.
             rows = await db().fetch(
                 f"""
+                with win as (
+                    select * from prediction_errors
+                    where has_all_horizons
+                      and ping_gap_seconds <= $3
+                      and start_date between $1 and $2
+                ),
+                present as (select count(distinct source) as sources from win),
+                matched as (
+                    select start_date, trip_id, stop_sequence, horizon_minutes
+                    from win
+                    group by 1, 2, 3, 4
+                    having count(distinct source) = (select sources from present)
+                ),
+                scoped as (
+                    select * from win
+                    join matched using (start_date, trip_id, stop_sequence, horizon_minutes)
+                    where true {band_sql}
+                )
                 select source, horizon_minutes,
                        count(*)                                        as n,
                        avg(abs_error_seconds)::float8                  as mae_seconds,
@@ -500,11 +529,7 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                        (percentile_cont(0.9) within group
                         (order by abs_error_seconds))::float8           as p90_seconds,
                        avg(error_seconds)::float8                      as bias_seconds
-                from prediction_errors
-                where has_all_horizons
-                  and ping_gap_seconds <= $3
-                  and start_date between $1 and $2
-                  {band_sql}
+                from scoped
                 group by source, horizon_minutes
                 order by source, horizon_minutes
                 """,
@@ -539,8 +564,33 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
         async def produce() -> list[RouteComparison]:
             win = await resolve_window()
             band_sql, band_args = time_band_clause(time_band, 7)
+            # Matched population, same reasoning as the headline and ADR-0043.
+            # Per route this matters more, not less: a route where the model has
+            # an anchor for only half the arrivals would otherwise be compared
+            # against MTS scored on all of them, and the per route table is
+            # exactly where someone looks to find where the model wins.
             rows = await db().fetch(
                 f"""
+                with win as (
+                    select * from prediction_errors
+                    where horizon_minutes = $3
+                      and has_all_horizons
+                      and ping_gap_seconds <= $4
+                      and start_date between $1 and $2
+                      and route_id is not null
+                ),
+                present as (select count(distinct source) as sources from win),
+                matched as (
+                    select start_date, trip_id, stop_sequence, horizon_minutes
+                    from win
+                    group by 1, 2, 3, 4
+                    having count(distinct source) = (select sources from present)
+                ),
+                scoped as (
+                    select * from win
+                    join matched using (start_date, trip_id, stop_sequence, horizon_minutes)
+                    where true {band_sql}
+                )
                 select pe.route_id,
                        max(r.route_long_name)                             as route_name,
                        count(*) filter (where pe.source = 'mts')          as n,
@@ -548,15 +598,9 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
                         filter (where pe.source = 'mts'))::float8         as mts_mae_seconds,
                        (avg(pe.abs_error_seconds)
                         filter (where pe.source = $6))::float8            as model_mae_seconds
-                from prediction_errors pe
+                from scoped pe
                 left join routes r
                        on r.feed_version = pe.feed_version and r.route_id = pe.route_id
-                where pe.horizon_minutes = $3
-                  and pe.has_all_horizons
-                  and pe.ping_gap_seconds <= $4
-                  and pe.start_date between $1 and $2
-                  and pe.route_id is not null
-                  {band_sql}
                 group by pe.route_id
                 having count(*) filter (where pe.source = 'mts') >= $5
                 order by (avg(pe.abs_error_seconds) filter (where pe.source = 'mts')) desc
