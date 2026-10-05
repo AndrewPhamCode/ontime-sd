@@ -28,15 +28,32 @@ create table if not exists schema_migrations (
 """
 
 
+# A serving query that takes longer than this is stuck, and failing fast is
+# better than holding a connection. Right for the collector and the API.
+SERVING_COMMAND_TIMEOUT = 30
+
+# Batch jobs are the opposite case: their queries legitimately run for minutes
+# because they aggregate the whole history, so a 30 second limit is a bug rather
+# than a safeguard. `ontime-evaluate --days 8` died on this against 7.4M
+# predictions on a t4g.small, having worked on a faster laptop, which is exactly
+# the shape of failure a shared default produces. Still bounded, because a batch
+# job that runs for half an hour is also wrong and should say so.
+BATCH_COMMAND_TIMEOUT = 1800
+
+
 async def create_pool(settings: Settings, **kwargs: object) -> asyncpg.Pool:
     """Open the connection pool.
 
     The pool is small on purpose. The collector has one writer task per feed
     plus the health endpoint, so a large pool would only mask a stuck query.
+
+    Batch entry points pass `command_timeout=BATCH_COMMAND_TIMEOUT`. The default
+    here stays the serving one, so a new caller that forgets inherits the
+    conservative value rather than an unbounded wait.
     """
     kwargs.setdefault("min_size", 1)
     kwargs.setdefault("max_size", 4)
-    kwargs.setdefault("command_timeout", 30)
+    kwargs.setdefault("command_timeout", SERVING_COMMAND_TIMEOUT)
     return await asyncpg.create_pool(settings.database_url, **kwargs)
 
 

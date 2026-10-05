@@ -670,10 +670,10 @@ async def load_feed(
 
 
 async def run(settings: Settings | None = None, *, force: bool = False) -> LoadResult:
-    from ontime_sd.db import create_pool
+    from ontime_sd.db import BATCH_COMMAND_TIMEOUT, create_pool
 
     settings = settings or Settings.from_env()
-    pool = await create_pool(settings)
+    pool = await create_pool(settings, command_timeout=BATCH_COMMAND_TIMEOUT)
     try:
         result = await load_feed(settings, pool, force=force)
         await record_load(pool, result)

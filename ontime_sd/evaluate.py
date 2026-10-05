@@ -194,7 +194,7 @@ def main() -> None:
     from datetime import timedelta
 
     from ontime_sd.config import Settings
-    from ontime_sd.db import create_pool
+    from ontime_sd.db import BATCH_COMMAND_TIMEOUT, create_pool
     from ontime_sd.logging_setup import configure_logging
 
     parser = argparse.ArgumentParser(description="Score MTS predictions against inferred arrivals")
@@ -216,7 +216,7 @@ def main() -> None:
     configure_logging(settings.log_level)
 
     async def run() -> tuple[int, list[dict[str, float]]]:
-        pool = await create_pool(settings)
+        pool = await create_pool(settings, command_timeout=BATCH_COMMAND_TIMEOUT)
         try:
             written = await evaluate_days(pool, days)
             return written, await headline(pool)

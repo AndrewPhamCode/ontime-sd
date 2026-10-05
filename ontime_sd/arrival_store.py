@@ -246,7 +246,7 @@ def main() -> None:
     from datetime import timedelta
 
     from ontime_sd.config import Settings
-    from ontime_sd.db import create_pool
+    from ontime_sd.db import BATCH_COMMAND_TIMEOUT, create_pool
     from ontime_sd.logging_setup import configure_logging
 
     parser = argparse.ArgumentParser(description="Infer arrivals from GPS traces")
@@ -268,7 +268,7 @@ def main() -> None:
     configure_logging(settings.log_level)
 
     async def run() -> dict[str, int]:
-        pool = await create_pool(settings)
+        pool = await create_pool(settings, command_timeout=BATCH_COMMAND_TIMEOUT)
         try:
             return await infer_for_days(pool, days)
         finally:

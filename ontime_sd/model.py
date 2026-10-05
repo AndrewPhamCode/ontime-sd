@@ -410,7 +410,7 @@ def main() -> None:
     import asyncio
 
     from ontime_sd.config import Settings
-    from ontime_sd.db import create_pool
+    from ontime_sd.db import BATCH_COMMAND_TIMEOUT, create_pool
     from ontime_sd.logging_setup import configure_logging
 
     parser = argparse.ArgumentParser(description="Fit and score the Phase 5 predictors")
@@ -424,7 +424,7 @@ def main() -> None:
     configure_logging(settings.log_level)
 
     async def run() -> dict[str, int]:
-        pool = await create_pool(settings)
+        pool = await create_pool(settings, command_timeout=BATCH_COMMAND_TIMEOUT)
         try:
             return await run_phase5(
                 pool,
