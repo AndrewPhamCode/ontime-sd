@@ -2185,3 +2185,64 @@ it reported route 992 at n=389, MTS 3.30, ours 2.39 where the matched figures ar
 n=363, 3.20 and 2.40. The per route table is where someone looks to find where the
 model wins, so it is the last place that should be scored on a population the
 model never had to attempt.
+
+## ADR-0051: Stop lookups get their own indexes, built concurrently
+
+**Status:** Accepted
+
+Clicking a stop on the live map returned a 504. `/api/stops/{id}/upcoming`
+filters `predictions` on `stop_id`, and the only index on that table is the
+primary key, which leads with `start_date`. So every click read the whole
+table: 22.6M rows and 2.5 GB in 8.4s on the laptop, and longer than the gateway
+waits on the t4g.small, whose 2 GB of RAM cannot hold the table in cache. The
+popup's other query, recent history from `prediction_errors`, had the same
+shape at a smaller size (270 ms).
+
+This was a missing index, not an undersized host. The scan grows with every day
+collected, about 1M prediction rows a day, so a bigger instance would only have
+moved the date it broke.
+
+**Decision.** Two indexes, matching each query's filter and order:
+
+- `predictions (stop_id, arrival_time)`: one stop, arrivals after now. 8.4s to
+  8.6 ms on the laptop.
+- `prediction_errors (stop_id, horizon_minutes, arrived_at desc)`: the `limit
+  25` reads 25 index entries and stops. 270 ms to 3.9 ms.
+
+Both are built with `CREATE INDEX CONCURRENTLY`. A plain `CREATE INDEX` takes a
+lock that blocks inserts for the whole build, and on the cloud host that is
+minutes of the collector unable to write: a hole in realtime data that can never
+be backfilled.
+
+**The runner change.** Postgres refuses `CONCURRENTLY` inside a transaction, and
+ADR-0002's runner wraps every file in one. A file whose first line is
+`-- migrate: no-transaction` now runs outside a transaction, one statement at a
+time. It has to be split, because Postgres runs a multi statement query string
+as one implicit transaction, which `CONCURRENTLY` also refuses. The split is
+naive (drop comment lines, cut on semicolons), which is enough for index DDL and
+is documented as the limit.
+
+Giving up the transaction gives up atomicity, so the file must be safe to re-run.
+The trap is that a failed concurrent build leaves an `INVALID` index behind, and
+`create index if not exists` would then skip it forever, leaving an index that
+exists, costs writes, and is never used. Each index is therefore dropped
+concurrently before it is created, so a retry rebuilds instead of trusting what a
+failed run left. A test asserts both indexes are valid.
+
+**Cost.** One more index to maintain per prediction write, about 1M a day. On the
+laptop the indexes are 448 MB and 89 MB, against a 100 GB data volume on the
+host. The laptop built both in 37s while the collector kept writing.
+
+**The deploy was also lying.** The deploy workflow waited 5 minutes for the
+remote command and, when it ran out of attempts, fell through and passed. A slow
+migration would have shown as a green deploy while still running. It now waits
+up to 30 minutes and fails if the command has not succeeded.
+
+**Rejected.**
+
+- *Filter on recent `start_date` so the primary key narrows the scan.* Still
+  reads every prediction for the day, about 1M rows. Faster, not fixed.
+- *A latest prediction table maintained by the collector.* The fastest read, but
+  it adds a second write path to the one process that must never fail, to solve
+  what an index solves.
+- *A bigger instance.* Treats the symptom. See above.
