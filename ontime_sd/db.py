@@ -6,6 +6,8 @@ ORM costs more than it gives. See DESIGN.md ADR-0003.
 
 Migrations are numbered .sql files applied in filename order, each in its own
 transaction, with applied versions recorded in schema_migrations. See ADR-0002.
+The one exception is a file marked for building indexes concurrently, see
+ADR-0051.
 """
 
 from __future__ import annotations
@@ -86,12 +88,39 @@ async def run_migrations(
     versions: list[str] = []
     for path in pending:
         sql = path.read_text()
-        async with conn.transaction():
-            await conn.execute(sql)
+        if sql.startswith(NO_TRANSACTION_MARKER):
+            for statement in split_statements(sql):
+                await conn.execute(statement)
             await conn.execute("insert into schema_migrations (version) values ($1)", path.stem)
+        else:
+            async with conn.transaction():
+                await conn.execute(sql)
+                await conn.execute("insert into schema_migrations (version) values ($1)", path.stem)
         log.info("applied migration", extra={"version": path.stem})
         versions.append(path.stem)
     return versions
+
+
+# A migration whose first line is this runs outside a transaction, one statement
+# at a time. It exists for CREATE INDEX CONCURRENTLY, which Postgres refuses inside
+# a transaction block, and a plain CREATE INDEX blocks the collector's inserts for
+# the whole build: a hole in realtime data that can never be backfilled. Such a
+# file gives up atomicity, so every statement in it must be safe to re-run. See
+# DESIGN.md ADR-0051.
+NO_TRANSACTION_MARKER = "-- migrate: no-transaction"
+
+
+def split_statements(sql: str) -> list[str]:
+    """Split a no-transaction migration into statements.
+
+    Sending the file as one string would not work: Postgres runs a multi
+    statement simple query as one implicit transaction, which is exactly what
+    CONCURRENTLY refuses. The split is deliberately naive, dropping `--` comment
+    lines and cutting on semicolons, so these files must not contain semicolons
+    inside strings or function bodies. Index DDL never needs to.
+    """
+    code = "\n".join(line for line in sql.splitlines() if not line.lstrip().startswith("--"))
+    return [s.strip() for s in code.split(";") if s.strip()]
 
 
 async def migrate(settings: Settings | None = None) -> list[str]:

@@ -13,7 +13,12 @@ from datetime import UTC, date, datetime, timedelta
 import asyncpg
 import pytest
 
-from ontime_sd.db import pending_migrations, run_migrations
+from ontime_sd.db import (
+    NO_TRANSACTION_MARKER,
+    pending_migrations,
+    run_migrations,
+    split_statements,
+)
 
 SERVICE_DAY = date(2026, 9, 27)
 NOON = datetime(2026, 9, 27, 19, 0, tzinfo=UTC)
@@ -216,6 +221,93 @@ async def test_horizon_lookup_is_served_by_the_primary_key_index(
     # Descending order comes from walking the primary key index backwards,
     # which is why no separate descending index exists.
     assert "Backward" in plan, plan
+
+
+# --- stop popup indexes: ADR-0051 ---
+
+
+async def _plan(conn: asyncpg.Connection, sql: str, *args: object) -> str:
+    await conn.execute("set local enable_seqscan to off")
+    rows = await conn.fetch(f"explain (format text) {sql}", *args)
+    return "\n".join(row[0] for row in rows)
+
+
+async def test_upcoming_arrivals_at_a_stop_use_an_index(conn: asyncpg.Connection) -> None:
+    """The /upcoming filter was a full scan of predictions and timed out in prod."""
+    plan = await _plan(
+        conn,
+        "select trip_id from predictions where stop_id = $1 "
+        "and arrival_time is not null and arrival_time > now()",
+        "10839",
+    )
+    assert "predictions_stop_arrival_idx" in plan, plan
+
+
+async def test_recent_errors_at_a_stop_use_an_index(conn: asyncpg.Connection) -> None:
+    plan = await _plan(
+        conn,
+        "select trip_id from prediction_errors where stop_id = $1 "
+        "and horizon_minutes = $2 order by arrived_at desc limit 25",
+        "10839",
+        10,
+    )
+    assert "prediction_errors_stop_idx" in plan, plan
+
+
+async def test_concurrent_indexes_were_built_valid(conn: asyncpg.Connection) -> None:
+    """A failed CONCURRENTLY build leaves an index that exists but is never used."""
+    rows = await conn.fetch(
+        """
+        select c.relname, i.indisvalid
+        from pg_index i join pg_class c on c.oid = i.indexrelid
+        where c.relname in ('predictions_stop_arrival_idx', 'prediction_errors_stop_idx')
+        """
+    )
+    assert {r["relname"]: r["indisvalid"] for r in rows} == {
+        "predictions_stop_arrival_idx": True,
+        "prediction_errors_stop_idx": True,
+    }
+
+
+def test_split_statements_drops_comments_and_cuts_on_semicolons() -> None:
+    sql = (
+        f"{NO_TRANSACTION_MARKER}\n"
+        "-- a comment; with a semicolon\n"
+        "drop index concurrently if exists a_idx;\n"
+        "create index concurrently a_idx\n"
+        "    on t (x);\n"
+    )
+    assert split_statements(sql) == [
+        "drop index concurrently if exists a_idx",
+        "create index concurrently a_idx\n    on t (x)",
+    ]
+
+
+async def test_no_transaction_migration_can_build_an_index_concurrently(
+    db_pool: asyncpg.Pool, tmp_path
+) -> None:
+    """Without the marker this exact file fails: CONCURRENTLY refuses a transaction.
+
+    Uses its own connection, not the rolled back `conn` fixture, because that one
+    is already inside a transaction. Cleans up after itself instead.
+    """
+    version = "999_concurrent_probe"
+    (tmp_path / f"{version}.sql").write_text(
+        f"{NO_TRANSACTION_MARKER}\n"
+        "create table concurrent_probe (x int);\n"
+        "create index concurrently concurrent_probe_idx on concurrent_probe (x);\n"
+    )
+    async with db_pool.acquire() as connection:
+        try:
+            assert await run_migrations(connection, tmp_path) == [version]
+            valid = await connection.fetchval(
+                "select i.indisvalid from pg_index i join pg_class c on c.oid = i.indexrelid "
+                "where c.relname = 'concurrent_probe_idx'"
+            )
+            assert valid is True
+        finally:
+            await connection.execute("drop table if exists concurrent_probe")
+            await connection.execute("delete from schema_migrations where version = $1", version)
 
 
 # --- poll_log: ADR-0018 ---

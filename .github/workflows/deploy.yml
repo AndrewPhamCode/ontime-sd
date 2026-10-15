@@ -156,7 +156,12 @@ jobs:
             ]' \
             --query Command.CommandId --output text)
 
-          for _ in $(seq 1 60); do
+          # Up to 30 minutes, because a migration that builds an index
+          # concurrently on the t4g.small runs for minutes (ADR-0051). Running out
+          # of attempts is a failure: the loop used to fall through and report a
+          # deploy as green while the command was still running.
+          status=Pending
+          for _ in $(seq 1 360); do
             status=$(aws ssm get-command-invocation --command-id "$cmd" \
               --instance-id "${{ steps.targets.outputs.instance }}" --query Status --output text 2>/dev/null || echo Pending)
             case "$status" in
@@ -168,6 +173,10 @@ jobs:
             esac
             sleep 5
           done
+          if [ "$status" != Success ]; then
+            echo "deploy command still $status after 30 minutes" >&2
+            exit 1
+          fi
 
           # The collector is deliberately not restarted here. It is the thing
           # that must never stop, and a frontend change is no reason to
