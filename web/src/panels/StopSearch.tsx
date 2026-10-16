@@ -3,7 +3,13 @@ import { api, type StopSearchResult } from '../api/client';
 
 /** Find a stop by name. Busiest matches first, because those are the ones someone
  *  is most likely looking for. */
-export function StopSearch({ onPick }: { onPick: (stop: StopSearchResult) => void }) {
+export function StopSearch({
+  onPick,
+  placeholder = 'Search stops, e.g. Gilman',
+}: {
+  onPick: (stop: StopSearchResult) => void;
+  placeholder?: string;
+}) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<StopSearchResult[]>([]);
   const [open, setOpen] = useState(false);
@@ -48,8 +54,8 @@ export function StopSearch({ onPick }: { onPick: (stop: StopSearchResult) => voi
       <input
         type="search"
         value={query}
-        placeholder="Search stops, e.g. Gilman"
-        aria-label="Search stops by name"
+        placeholder={placeholder}
+        aria-label={placeholder}
         onChange={(event) => setQuery(event.target.value)}
         onFocus={() => results.length && setOpen(true)}
         onKeyDown={(event) => {

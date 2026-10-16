@@ -202,6 +202,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/trip-plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Plan Trip
+         * @description Which stop to walk to, which bus to take, and when to be at the stop.
+         *
+         *     Direct rides only. "Be at the stop by" is the departure estimate minus a
+         *     margin from the route's measured early tail, see ADR-0052.
+         */
+        get: operations["plan_trip_api_trip_plan_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/vehicles": {
         parameters: {
             query?: never;
@@ -468,6 +491,97 @@ export interface components {
              * Format: date-time
              */
             as_of: string;
+        };
+        /**
+         * TripOption
+         * @description One direct ride, with the times a rider acts on.
+         */
+        TripOption: {
+            /** Trip Id */
+            trip_id: string;
+            /** Route Id */
+            route_id: string | null;
+            /** Route Short Name */
+            route_short_name: string | null;
+            /** Route Type */
+            route_type: number | null;
+            /** Headsign */
+            headsign: string | null;
+            board: components["schemas"]["TripStop"];
+            alight: components["schemas"]["TripStop"];
+            /** Stops Ridden */
+            stops_ridden: number;
+            /** Walk To Stop Seconds */
+            walk_to_stop_seconds: number;
+            /** Walk From Stop Seconds */
+            walk_from_stop_seconds: number;
+            /**
+             * Leave By
+             * Format: date-time
+             */
+            leave_by: string;
+            /**
+             * Be At Stop By
+             * Format: date-time
+             */
+            be_at_stop_by: string;
+            /**
+             * Departs At
+             * Format: date-time
+             */
+            departs_at: string;
+            /** Departure Basis */
+            departure_basis: string;
+            /**
+             * Scheduled Departure
+             * Format: date-time
+             */
+            scheduled_departure: string;
+            /** Margin Seconds */
+            margin_seconds: number;
+            /** Margin Basis */
+            margin_basis: string;
+            /**
+             * Arrives At
+             * Format: date-time
+             */
+            arrives_at: string;
+            /**
+             * Arrive At Destination
+             * Format: date-time
+             */
+            arrive_at_destination: string;
+        };
+        /** TripPlan */
+        TripPlan: {
+            /** Mode */
+            mode: string;
+            /** Arrive By */
+            arrive_by: string | null;
+            /** Origin Stops */
+            origin_stops: number;
+            /** Destination Stops */
+            destination_stops: number;
+            /** Options */
+            options: components["schemas"]["TripOption"][];
+            /** Message */
+            message: string | null;
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+        };
+        /** TripStop */
+        TripStop: {
+            /** Stop Id */
+            stop_id: string;
+            /** Stop Name */
+            stop_name: string | null;
+            /** Lat */
+            lat: number;
+            /** Lon */
+            lon: number;
         };
         /**
          * UpcomingArrival
@@ -903,6 +1017,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StopUpcoming"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_trip_api_trip_plan_get: {
+        parameters: {
+            query: {
+                from_lat: number;
+                from_lon: number;
+                to_lat: number;
+                to_lon: number;
+                /** @description Arrive at the destination by this time. Omit to leave now. */
+                arrive_by?: string | null;
+                max_walk_m?: number;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TripPlan"];
                 };
             };
             /** @description Validation Error */
