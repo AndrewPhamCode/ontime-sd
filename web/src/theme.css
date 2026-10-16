@@ -958,3 +958,172 @@ body,
     gap: 8px;
   }
 }
+
+/* Sheet tabs: stop arrivals or the trip planner */
+.sheet-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 18px 0;
+  border-bottom: 1px solid var(--grid);
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 3;
+}
+
+.sheet-tabs button {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--ink-secondary);
+  cursor: pointer;
+}
+
+.sheet-tabs button.active {
+  color: var(--ink);
+  font-weight: 600;
+  border-bottom-color: var(--series-lgbm);
+}
+
+/* Trip planner */
+.trip-field {
+  margin-top: 14px;
+}
+
+.trip-field-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.trip-field-label {
+  font-weight: 600;
+  min-width: 38px;
+}
+
+.trip-place {
+  color: var(--ink-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trip-place.muted,
+.trip-arrive .muted,
+.trip-steps .muted {
+  color: var(--ink-muted);
+}
+
+.trip-field-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.trip-field-row .search {
+  flex: 1 1 180px;
+  max-width: none;
+}
+
+.trip-field-row .search-results {
+  z-index: 4;
+}
+
+.trip-arrive {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  font-size: 13px;
+}
+
+.trip-arrive input {
+  font: inherit;
+  padding: 5px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.trip-note {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--series-mts);
+}
+
+.trip-options > li {
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  padding-left: 9px;
+  margin-left: -12px;
+}
+
+.trip-options > li.chosen {
+  border-left-color: var(--series-lgbm);
+}
+
+.trip-steps {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--ink-secondary);
+  line-height: 1.5;
+}
+
+/* The steps sit inside an arrivals row, so undo the row styling they inherit. */
+.trip-steps li {
+  border: none;
+  padding: 0;
+  margin: 2px 0 0;
+}
+
+.trip-steps strong {
+  color: var(--ink);
+}
+
+.trip-margin {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.trip-marker {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 3px solid var(--surface);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+
+.trip-marker-from {
+  background: var(--ink);
+}
+
+.trip-marker-to {
+  background: var(--series-mts);
+  border-radius: 3px;
+}
+
+.trip-marker-board,
+.trip-marker-alight {
+  width: 14px;
+  height: 14px;
+  background: var(--surface);
+  border-width: 4px;
+}
+
+.trip-marker-board {
+  border-color: var(--series-lgbm);
+}
+
+.trip-marker-alight {
+  border-color: var(--series-segment);
+}

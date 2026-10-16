@@ -33,6 +33,15 @@ const FRAME_MS = 60;
 // the icon to match would make stationary buses spin.
 const MIN_HEADING_METRES = 12;
 
+/** A trip planner point drawn over the map: the rider's start and destination,
+ *  and the stops the chosen ride boards and alights at. */
+export interface MapMarker {
+  kind: 'from' | 'to' | 'board' | 'alight';
+  lon: number;
+  lat: number;
+  title: string;
+}
+
 interface Props {
   stops: readonly Stop[];
   vehicles: readonly Vehicle[];
@@ -42,6 +51,11 @@ interface Props {
   flyTo: { center: [number, number]; zoom: number } | null;
   showVehicles: boolean;
   showStopLabels: boolean;
+  /** Set only while the trip planner is waiting for a tap. While set, a tap on
+   *  the map is a place, including a tap on a stop pin, rather than a stop
+   *  selection, so picking a destination never opens a different panel. */
+  onMapClick?: ((lngLat: [number, number]) => void) | null;
+  markers?: readonly MapMarker[];
 }
 
 type Tween = {
@@ -50,6 +64,8 @@ type Tween = {
   started: number;
   heading: number;
 };
+
+const NO_MARKERS: readonly MapMarker[] = [];
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const easeOut = (t: number) => 1 - (1 - t) * (1 - t);
@@ -69,11 +85,24 @@ export function MapView({
   flyTo,
   showVehicles,
   showStopLabels,
+  onMapClick = null,
+  markers = NO_MARKERS,
 }: Props) {
   const container = useRef<HTMLDivElement | null>(null);
   const map = useRef<maplibregl.Map | null>(null);
   const [ready, setReady] = useState(false);
   const tweens = useRef(new Map<string, Tween>());
+  // A ref rather than a dependency of the map effect, so entering pick mode does
+  // not tear down and rebuild the map.
+  const mapClick = useRef(onMapClick);
+  const drawn = useRef<maplibregl.Marker[]>([]);
+  const framed = useRef('');
+
+  useEffect(() => {
+    mapClick.current = onMapClick;
+    const canvas = map.current?.getCanvas();
+    if (canvas) canvas.style.cursor = onMapClick ? 'crosshair' : '';
+  }, [onMapClick]);
 
   // Visibility is toggled on the live layers rather than by rebuilding the map,
   // so flipping a switch does not drop the viewport or the icon atlas.
@@ -209,16 +238,22 @@ export function MapView({
       });
 
       instance.on('click', 'stops', (event) => {
+        if (mapClick.current) return;
         const stopId = event.features?.[0]?.properties?.['stop_id'];
         if (typeof stopId === 'string') onSelect(stopId);
       });
+      instance.on('click', (event) => {
+        mapClick.current?.([event.lngLat.lng, event.lngLat.lat]);
+      });
+      const idleCursor = () => (mapClick.current ? 'crosshair' : '');
       // mousemove, not mouseenter: vehicles draw with icon-allow-overlap, so
       // moving from one bus to the one beside it never leaves the layer and
       // mouseenter does not fire again. The popup would keep the first bus's
       // route and position while the cursor sat on a different bus.
       for (const layer of ['stops', 'vehicles']) {
         instance.on('mousemove', layer, (event) => {
-          instance.getCanvas().style.cursor = layer === 'stops' ? 'pointer' : '';
+          instance.getCanvas().style.cursor =
+            layer === 'stops' && !mapClick.current ? 'pointer' : idleCursor();
           const props = event.features?.[0]?.properties;
           if (!props) return;
           const html =
@@ -228,7 +263,7 @@ export function MapView({
           popup.setLngLat(event.lngLat).setHTML(html).addTo(instance);
         });
         instance.on('mouseleave', layer, () => {
-          instance.getCanvas().style.cursor = '';
+          instance.getCanvas().style.cursor = idleCursor();
           popup.remove();
         });
       }
@@ -351,6 +386,31 @@ export function MapView({
       instance.setFilter('stop-selected', ['==', ['get', 'stop_id'], selected ?? '']);
     }
   }, [selected, ready]);
+
+  // DOM markers rather than a layer: there are at most four, and the stops a ride
+  // uses may not be among the observed stops the pin layer draws.
+  useEffect(() => {
+    const instance = map.current;
+    if (!instance || !ready) return;
+    for (const marker of drawn.current) marker.remove();
+    drawn.current = markers.map((m) => {
+      const element = document.createElement('div');
+      element.className = `trip-marker trip-marker-${m.kind}`;
+      element.title = m.title;
+      element.setAttribute('aria-label', m.title);
+      return new maplibregl.Marker({ element }).setLngLat([m.lon, m.lat]).addTo(instance);
+    });
+
+    // Frame the trip when its points change, not on every refresh of the same
+    // answer, or the map would jump back while the rider is panning it.
+    const signature = markers.map((m) => `${m.kind}:${m.lon},${m.lat}`).join('|');
+    if (markers.length >= 2 && signature !== framed.current) {
+      const bounds = new maplibregl.LngLatBounds();
+      for (const m of markers) bounds.extend([m.lon, m.lat]);
+      instance.fitBounds(bounds, { padding: 70, maxZoom: 15.5, duration: 900 });
+    }
+    framed.current = signature;
+  }, [markers, ready]);
 
   return <div ref={container} style={{ position: 'absolute', inset: 0 }} />;
 }

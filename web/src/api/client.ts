@@ -22,6 +22,15 @@ export type Vehicle = Schemas['Vehicle'];
 export type StopUpcoming = Schemas['StopUpcoming'];
 export type UpcomingArrival = Schemas['UpcomingArrival'];
 export type StopSearchResult = Schemas['StopSearchResult'];
+export type TripPlan = Schemas['TripPlan'];
+export type TripOption = Schemas['TripOption'];
+
+/** A point a trip starts or ends at, with what to call it on screen. */
+export interface Place {
+  lat: number;
+  lon: number;
+  label: string;
+}
 
 export class ApiError extends Error {
   constructor(
@@ -105,4 +114,14 @@ export const api = {
     ),
   searchStops: (query_: string) =>
     get<StopSearchResult[]>(`/api/stops/search?q=${encodeURIComponent(query_)}`),
+  tripPlan: (from: Place, to: Place, arriveBy: string | null) =>
+    get<TripPlan>(
+      `/api/trip-plan?${query({
+        from_lat: from.lat,
+        from_lon: from.lon,
+        to_lat: to.lat,
+        to_lon: to.lon,
+        ...(arriveBy ? { arrive_by: arriveBy } : {}),
+      })}`,
+    ),
 };
