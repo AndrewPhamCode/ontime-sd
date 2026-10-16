@@ -39,7 +39,7 @@ where feed_version = $1 and trip_id = $2
 order by stop_sequence
 """
 
-_CURRENT_FEED_SQL = """
+CURRENT_FEED_SQL = """
 select feed_version
 from feed_versions
 where loaded_at is not null
@@ -139,7 +139,7 @@ class StopSequenceResolver:
         poll to catch a monthly event is the wrong trade. Recorded in ADR-0033.
         """
         if self._feed_version is None:
-            self._feed_version = await conn.fetchval(_CURRENT_FEED_SQL, service_day)
+            self._feed_version = await conn.fetchval(CURRENT_FEED_SQL, service_day)
             if self._feed_version is None:
                 log.warning(
                     "no loaded schedule covers this day, predictions cannot resolve",

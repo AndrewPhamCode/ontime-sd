@@ -20,15 +20,17 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Annotated, Any
 
 import asyncpg
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from ontime_sd import trip_plan as tp
 from ontime_sd.config import SERVICE_TZ, Settings
 from ontime_sd.db import create_pool
 from ontime_sd.evaluate import TIGHT_LABEL_SECONDS
+from ontime_sd.trip_stops import CURRENT_FEED_SQL
 
 log = logging.getLogger(__name__)
 
@@ -283,6 +285,54 @@ class StopUpcoming(BaseModel):
     as_of: datetime
 
 
+class TripStop(BaseModel):
+    stop_id: str
+    stop_name: str | None
+    lat: float
+    lon: float
+
+
+class TripOption(BaseModel):
+    """One direct ride, with the times a rider acts on."""
+
+    trip_id: str
+    route_id: str | None
+    route_short_name: str | None
+    route_type: int | None
+    headsign: str | None
+
+    board: TripStop
+    alight: TripStop
+    stops_ridden: int
+    walk_to_stop_seconds: int
+    walk_from_stop_seconds: int
+
+    leave_by: datetime
+    be_at_stop_by: datetime
+    departs_at: datetime
+    # corrected, mts or scheduled: which estimate departs_at is.
+    departure_basis: str
+    scheduled_departure: datetime
+    # How far ahead of departs_at be_at_stop_by is, and whether that came from the
+    # route's measured early tail or is the fixed default.
+    margin_seconds: int
+    margin_basis: str
+    arrives_at: datetime
+    arrive_at_destination: datetime
+
+
+class TripPlan(BaseModel):
+    mode: str
+    arrive_by: datetime | None
+    origin_stops: int
+    destination_stops: int
+    options: list[TripOption]
+    # Set when there is nothing to show, saying why, so an empty answer is not
+    # mistaken for a broken one.
+    message: str | None
+    as_of: datetime
+
+
 class StopSearchResult(BaseModel):
     stop_id: str
     stop_name: str | None
@@ -360,6 +410,113 @@ def validate_source(source: str) -> str:
     return source
 
 
+# --- trip planning -----------------------------------------------------------
+#
+# Direct rides only, see ADR-0052. The pure decisions live in trip_plan.py; what
+# is here is the database work.
+
+# Stops in a lat/lon box, for the nearest stop search. Stations (location_type 1)
+# are excluded because nobody boards at a station record, only at its platforms.
+NEARBY_STOPS_SQL = """
+select stop_id, stop_name, stop_lat::float8 as lat, stop_lon::float8 as lon
+from stops
+where feed_version = $1
+  and stop_lat between $2 and $3
+  and stop_lon between $4 and $5
+  and coalesce(location_type, 0) = 0
+"""
+
+# Every scheduled direct ride from an origin stop to a destination stop.
+#
+# The two stop_times rows are the same trip, and the destination's sequence must
+# be greater: that one condition is what rules out a bus going the other way.
+# `o` is found through stop_times_stop_idx and `d` through the primary key, so
+# this touches a few thousand rows however big the timetable is.
+#
+# Times are service day midnight plus seconds, which handles 25:30:00 on a trip
+# from yesterday's service day. DISTINCT ON keeps one boarding and alighting pair
+# per trip, the shortest door to door, because a bus passing three nearby stops is
+# one option rather than three.
+#
+# Filtering here is on the schedule, which is a superset of what the live
+# estimate allows; the final check against the live estimate is done afterwards.
+DIRECT_RIDES_SQL = """
+with origin as (
+    select * from unnest($2::text[], $3::int[]) as o(stop_id, walk_s)
+),
+dest as (
+    select * from unnest($4::text[], $5::int[]) as d(stop_id, walk_s)
+),
+days as (
+    select day as service_date,
+           (day::timestamp at time zone 'America/Los_Angeles') as midnight
+    from unnest($6::date[]) as day
+),
+rides as (
+    select sd.service_date, o.trip_id, t.route_id, t.trip_headsign,
+           o.stop_id as board_stop, o.stop_sequence as board_seq,
+           d.stop_id as alight_stop, d.stop_sequence as alight_seq,
+           ow.walk_s as walk_to, dw.walk_s as walk_from,
+           days.midnight + coalesce(o.departure_seconds, o.arrival_seconds)
+                           * interval '1 second' as departs,
+           days.midnight + coalesce(d.arrival_seconds, d.departure_seconds)
+                           * interval '1 second' as arrives
+    from stop_times o
+    join origin ow on ow.stop_id = o.stop_id
+    join stop_times d
+      on d.feed_version = o.feed_version
+     and d.trip_id = o.trip_id
+     and d.stop_sequence > o.stop_sequence
+    join dest dw on dw.stop_id = d.stop_id
+    join trips t on t.feed_version = o.feed_version and t.trip_id = o.trip_id
+    join service_dates sd
+      on sd.feed_version = o.feed_version and sd.service_id = t.service_id
+    join days on days.service_date = sd.service_date
+    where o.feed_version = $1
+      -- pickup_type and drop_off_type 1 mean no boarding or no alighting here.
+      and o.pickup_type is distinct from 1
+      and d.drop_off_type is distinct from 1
+      and coalesce(o.departure_seconds, o.arrival_seconds) is not null
+      and coalesce(d.arrival_seconds, d.departure_seconds) is not null
+),
+best as (
+    select distinct on (service_date, trip_id) *
+    from rides
+    where departs >= $7::timestamptz + walk_to * interval '1 second'
+      and departs <= $8::timestamptz
+      and ($9::timestamptz is null
+           or arrives + walk_from * interval '1 second' <= $9::timestamptz)
+    order by service_date, trip_id,
+             walk_to + extract(epoch from arrives - departs) + walk_from,
+             board_stop, alight_stop
+)
+select best.*, r.route_short_name, r.route_type
+from best
+left join routes r on r.feed_version = $1 and r.route_id = best.route_id
+order by case when $9::timestamptz is null then arrives end asc,
+         case when $9::timestamptz is not null then departs end desc
+limit $10
+"""
+
+# The newest MTS prediction for each (trip, stop) that a ride boards or alights
+# at. A primary key lookup per key.
+LATEST_PREDICTIONS_SQL = """
+select distinct on (p.start_date, p.trip_id, p.stop_sequence)
+       p.start_date, p.trip_id, p.stop_sequence, p.arrival_time, p.observed_at
+from predictions p
+join unnest($1::date[], $2::text[], $3::int[]) as k(start_date, trip_id, stop_sequence)
+  on p.start_date = k.start_date
+ and p.trip_id = k.trip_id
+ and p.stop_sequence = k.stop_sequence
+where p.arrival_time is not null
+order by p.start_date, p.trip_id, p.stop_sequence, p.observed_at desc
+"""
+
+# Candidates fetched before the live check, more than are returned, because some
+# will turn out unreachable once a bus is known to be running early.
+TRIP_CANDIDATES = 40
+
+
 # --- app ---------------------------------------------------------------------
 
 
@@ -430,6 +587,30 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
             },
             "route": {row["route_id"]: (row["n"], row["bias"]) for row in route_rows},
         }
+
+    async def _load_early_tail(horizon: int, max_ping_gap: int) -> dict[str, tuple]:
+        """Per route: (n, mean, p90) of MTS's signed error, in seconds.
+
+        Positive error means the bus came before MTS said, so the 90th percentile
+        is how early the early buses were. Route level rather than stop level,
+        because a percentile needs far more observations than a mean to settle and
+        most stop and route pairs do not have them.
+        """
+        rows = await db().fetch(
+            """
+            select route_id, count(*) as n,
+                   avg(error_seconds)::float8 as mean,
+                   (percentile_cont(0.9) within group (order by error_seconds))::float8
+                       as p90
+            from prediction_errors
+            where source = 'mts' and horizon_minutes = $1 and ping_gap_seconds <= $2
+              and route_id is not null
+            group by route_id
+            """,
+            horizon,
+            max_ping_gap,
+        )
+        return {row["route_id"]: (row["n"], row["mean"], row["p90"]) for row in rows}
 
     async def resolve_window() -> Window:
         """The window every comparison uses.
@@ -988,6 +1169,211 @@ def create_app(settings: Settings | None = None, pool: asyncpg.Pool | None = Non
             lon=info["lon"] if info else None,
             arrivals=arrivals[:limit],
             as_of=datetime.now(tz=UTC),
+        )
+
+    @app.get("/api/trip-plan", response_model=TripPlan)
+    async def plan_trip(
+        from_lat: float = Query(..., ge=-90, le=90),
+        from_lon: float = Query(..., ge=-180, le=180),
+        to_lat: float = Query(..., ge=-90, le=90),
+        to_lon: float = Query(..., ge=-180, le=180),
+        # Annotated rather than a Query default: a datetime default is not one ruff
+        # can prove immutable, and this form is FastAPI's recommended one anyway.
+        arrive_by: Annotated[
+            datetime | None,
+            Query(description="Arrive at the destination by this time. Omit to leave now."),
+        ] = None,
+        max_walk_m: int = Query(tp.DEFAULT_MAX_WALK_M, ge=100, le=tp.MAX_WALK_M_LIMIT),
+        limit: int = Query(3, ge=1, le=10),
+    ) -> TripPlan:
+        """Which stop to walk to, which bus to take, and when to be at the stop.
+
+        Direct rides only. "Be at the stop by" is the departure estimate minus a
+        margin from the route's measured early tail, see ADR-0052.
+        """
+        now = datetime.now(tz=UTC)
+        if arrive_by is not None:
+            if arrive_by.tzinfo is None:
+                arrive_by = arrive_by.replace(tzinfo=SERVICE_TZ)
+            if arrive_by <= now:
+                raise HTTPException(422, "arrive_by is in the past")
+            if arrive_by > now + timedelta(hours=24):
+                raise HTTPException(422, "arrive_by must be within the next 24 hours")
+
+        def empty(message: str, origin_n: int = 0, dest_n: int = 0) -> TripPlan:
+            return TripPlan(
+                mode="arrive_by" if arrive_by else "leave_now",
+                arrive_by=arrive_by,
+                origin_stops=origin_n,
+                destination_stops=dest_n,
+                options=[],
+                message=message,
+                as_of=now,
+            )
+
+        local_today = now.astimezone(SERVICE_TZ).date()
+        feed_version = await db().fetchval(CURRENT_FEED_SQL, local_today)
+        if feed_version is None:
+            return empty("No schedule is loaded for today.")
+
+        async def near(lat: float, lon: float) -> list[tp.NearbyStop]:
+            lat_lo, lat_hi, lon_lo, lon_hi = tp.bounding_box(lat, lon, max_walk_m)
+            rows = await db().fetch(NEARBY_STOPS_SQL, feed_version, lat_lo, lat_hi, lon_lo, lon_hi)
+            candidates = [(r["stop_id"], r["stop_name"], r["lat"], r["lon"]) for r in rows]
+            return tp.nearest_stops(lat, lon, candidates, max_walk_m)
+
+        origin = await near(from_lat, from_lon)
+        dest = await near(to_lat, to_lon)
+        if not origin:
+            return empty(f"No stop within {max_walk_m} m of your start.", 0, len(dest))
+        if not dest:
+            return empty(f"No stop within {max_walk_m} m of your destination.", len(origin), 0)
+
+        # Yesterday is included because a trip on yesterday's service day can still
+        # be running after midnight, with times past 24:00:00.
+        if arrive_by is None:
+            earliest, latest_departure = now, now + tp.LEAVE_NOW_WINDOW
+        else:
+            earliest = max(now, arrive_by - tp.ARRIVE_BY_WINDOW)
+            latest_departure = arrive_by
+        last_day = latest_departure.astimezone(SERVICE_TZ).date()
+        days = sorted({local_today - timedelta(days=1), local_today, last_day})
+
+        rides = await db().fetch(
+            DIRECT_RIDES_SQL,
+            feed_version,
+            [s.stop_id for s in origin],
+            [s.walk_seconds for s in origin],
+            [s.stop_id for s in dest],
+            [s.walk_seconds for s in dest],
+            days,
+            earliest,
+            latest_departure,
+            arrive_by,
+            TRIP_CANDIDATES,
+        )
+        if not rides:
+            return empty(
+                f"No direct ride between stops within {max_walk_m} m of each end "
+                + ("in the next 90 minutes." if arrive_by is None else "that arrives in time."),
+                len(origin),
+                len(dest),
+            )
+
+        keys = [(r["service_date"], r["trip_id"], r["board_seq"]) for r in rides] + [
+            (r["service_date"], r["trip_id"], r["alight_seq"]) for r in rides
+        ]
+        live_rows = await db().fetch(
+            LATEST_PREDICTIONS_SQL,
+            [k[0] for k in keys],
+            [k[1] for k in keys],
+            [k[2] for k in keys],
+        )
+        live = {
+            (r["start_date"], r["trip_id"], r["stop_sequence"]): r["arrival_time"]
+            for r in live_rows
+            if r["observed_at"] >= now - tp.LIVE_PREDICTION_MAX_AGE
+        }
+
+        bias = await cache.get(
+            f"bias:{BIAS_HORIZON_MINUTES}:{TIGHT_LABEL_SECONDS}",
+            lambda: _load_bias(BIAS_HORIZON_MINUTES, TIGHT_LABEL_SECONDS),
+        )
+        tails = await cache.get(
+            f"early_tail:{BIAS_HORIZON_MINUTES}:{TIGHT_LABEL_SECONDS}",
+            lambda: _load_early_tail(BIAS_HORIZON_MINUTES, TIGHT_LABEL_SECONDS),
+        )
+
+        def estimate(route_id: str | None, stop_id: str, mts: datetime | None, scheduled):
+            """Our corrected time if there is evidence for one, else MTS, else schedule."""
+            if mts is None:
+                return scheduled, tp.BASIS_SCHEDULED
+            pair = bias["stop_route"].get((stop_id, route_id)) if route_id else None
+            single = bias["route"].get(route_id) if route_id else None
+            chosen, _basis, _n = choose_bias(
+                pair[0] if pair else None,
+                pair[1] if pair else None,
+                single[0] if single else None,
+                single[1] if single else None,
+            )
+            if chosen is None:
+                return mts, tp.BASIS_MTS
+            return mts - timedelta(seconds=chosen), tp.BASIS_CORRECTED
+
+        stops_by_id = {s.stop_id: s for s in origin + dest}
+        candidates: list[tuple[tuple, TripOption]] = []
+        for r in rides:
+            route_id = r["route_id"]
+            departs, basis = estimate(
+                route_id,
+                r["board_stop"],
+                live.get((r["service_date"], r["trip_id"], r["board_seq"])),
+                r["departs"],
+            )
+            arrives, arrive_basis = estimate(
+                route_id,
+                r["alight_stop"],
+                live.get((r["service_date"], r["trip_id"], r["alight_seq"])),
+                r["arrives"],
+            )
+            if arrive_basis == tp.BASIS_SCHEDULED and basis != tp.BASIS_SCHEDULED:
+                # A bus running late where you board is late where you get off.
+                # Without this, arrive by would trust a timetable the bus has
+                # already fallen behind.
+                arrives = r["arrives"] + (departs - r["departs"])
+            margin, margin_basis = tp.choose_margin(
+                basis, tails.get(route_id) if route_id else None, MIN_ROUTE_SAMPLE
+            )
+            t = tp.timing(departs, arrives, margin, r["walk_to"], r["walk_from"])
+            if not tp.is_feasible(t, now, arrive_by):
+                continue
+            board, alight = stops_by_id[r["board_stop"]], stops_by_id[r["alight_stop"]]
+            option = TripOption(
+                trip_id=r["trip_id"],
+                route_id=route_id,
+                route_short_name=r["route_short_name"],
+                route_type=r["route_type"],
+                headsign=r["trip_headsign"],
+                board=TripStop(
+                    stop_id=board.stop_id, stop_name=board.stop_name, lat=board.lat, lon=board.lon
+                ),
+                alight=TripStop(
+                    stop_id=alight.stop_id,
+                    stop_name=alight.stop_name,
+                    lat=alight.lat,
+                    lon=alight.lon,
+                ),
+                stops_ridden=r["alight_seq"] - r["board_seq"],
+                walk_to_stop_seconds=r["walk_to"],
+                walk_from_stop_seconds=r["walk_from"],
+                leave_by=t.leave_by,
+                be_at_stop_by=t.be_at_stop_by,
+                departs_at=t.departs_at,
+                departure_basis=basis,
+                scheduled_departure=r["departs"],
+                margin_seconds=margin,
+                margin_basis=margin_basis,
+                arrives_at=t.arrives_at,
+                arrive_at_destination=t.arrive_at_destination,
+            )
+            candidates.append((tp.rank_key(t, arrive_by), option))
+
+        if not candidates:
+            return empty(
+                "Every direct ride found is already out of reach once live times "
+                "and the safety margin are counted.",
+                len(origin),
+                len(dest),
+            )
+        candidates.sort(key=lambda c: c[0])
+        return TripPlan(
+            mode="arrive_by" if arrive_by else "leave_now",
+            arrive_by=arrive_by,
+            origin_stops=len(origin),
+            destination_stops=len(dest),
+            options=[option for _, option in candidates[:limit]],
+            message=None,
+            as_of=now,
         )
 
     @app.get("/api/vehicles", response_model=list[Vehicle])

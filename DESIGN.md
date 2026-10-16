@@ -2185,3 +2185,72 @@ it reported route 992 at n=389, MTS 3.30, ours 2.39 where the matched figures ar
 n=363, 3.20 and 2.40. The per route table is where someone looks to find where the
 model wins, so it is the last place that should be scored on a population the
 model never had to attempt.
+
+## ADR-0052: A direct ride trip planner, with the margin taken from the early tail
+
+**Status:** Accepted
+
+The map answered "when is the next bus at this stop". A rider's actual question
+is "I am here and need to be there: which stop do I walk to, and by when".
+`GET /api/trip-plan` answers it for a start point, a destination, and optionally
+a time to arrive by.
+
+**Scope: direct rides only.** One bus or trolley from a stop within walking
+distance of the start to one within walking distance of the destination. It is
+one SQL statement: two `stop_times` rows on the same trip, the destination's
+`stop_sequence` greater than the origin's. That one inequality is what rules out
+a bus going the other way. When no single ride connects the two ends the response
+says so in words, rather than returning an empty list that looks like a fault.
+
+**"Be at the stop by" is the departure estimate minus a margin.** The failure
+that strands a rider is the bus that comes early, so the margin comes from the
+early tail of the measured error, not its mean:
+
+- Against MTS's raw estimate, the route's p90 of signed error at the 10 minute
+  horizon. One bus in ten came at least that much before MTS said.
+- Against our corrected estimate, p90 minus mean. The correction already removed
+  the mean, so the spread above it is what remains.
+- Against the schedule, a fixed 2 minutes, reported as `margin_basis: default`
+  so it is never mistaken for a measurement. Also used when the route has fewer
+  than 30 scored arrivals.
+- Never below 60 s, because the walk estimate alone is less precise than that.
+
+The percentile is per route, not per stop and route like the bias. A mean settles
+in tens of observations and a 90th percentile needs far more, which most stop and
+route pairs do not have.
+
+**The departure estimate** is, in order: our corrected time (the same
+`choose_bias` fallback as `/upcoming`), then MTS's latest prediction, then the
+schedule. A prediction last observed over 30 minutes ago is ignored. Change only
+storage (ADR-0005) means a few minutes of silence is normal, but half an hour
+usually means the trip dropped out of the feed. In practice a trip that has not
+started yet has no prediction at all, because MTS only predicts running trips, so
+options further out are honestly labelled `scheduled`.
+
+**Walking** is straight line distance times 1.3, at 1.3 m/s. Up to 12 nearest stops
+at each end within `max_walk_m` (800 m default). Nearby stops are a bounding box
+in SQL with the exact distance in Python, so the circle cuts the box's corners.
+
+**Times past midnight.** Yesterday's service day is always searched as well,
+because a 12:30am bus may be yesterday's trip at 24:30:00. Times are service day
+midnight plus seconds, the same convention as the rest of the API.
+
+**Cost.** On the real feed, Gilman Drive to Old Town: the boarding side reads 469
+rows per stop through `stop_times_stop_idx`, the alighting side goes through the
+primary key, and the statement runs in 24 ms. The route bias and early tail
+aggregates over `prediction_errors` take about 0.6 s together and sit behind the
+existing 60 s cache; the bias one is shared with `/upcoming`.
+
+**Rejected:**
+
+- *Transfers (RAPTOR or similar).* Covers far more trips, but timing a connection
+  is a different problem, and a planner that is wrong about transfers strands
+  people. Direct rides first, measured, then transfers as their own change.
+- *An external geocoder for addresses.* Rate limits, usage terms, and one more
+  thing that can go down. The stop search and a tap on the map cover the need.
+- *An external walking router.* Same reasons, and the margin already absorbs the
+  error of a straight line estimate.
+- *PostGIS for the nearby stop search.* 4,269 stops do not justify an extension,
+  and the schema has to run on plain Postgres.
+- *A margin from the mean error.* The mean is the number that ignores exactly the
+  early buses that leave without you.
